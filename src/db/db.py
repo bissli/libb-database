@@ -10,7 +10,7 @@ import pandas as pd
 from sqlalchemy import URL, create_engine
 
 from date import Date, DateTime
-from libb import BaseOptions, collapse, load_options, scriptname
+from libb import ConfigOptions, collapse, load_options, scriptname
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +153,7 @@ def logsql(func):
 
 
 @dataclass
-class Options(BaseOptions):
+class Options(ConfigOptions):
 
     drivername: str = 'postgresql+psycopg'
     hostname: str = None
