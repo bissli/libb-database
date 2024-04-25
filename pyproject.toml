@@ -9,23 +9,25 @@ packages = [{ include = "db", from = "src" }]
 [tool.poetry.dependencies]
 python = "~3.11"
 
-libb = { git = "https://github.com/bissli/libb.git", rev = "master" }
 pandas = "*"
 numpy = "*"
-# == date
-libb-date = { git = "https://github.com/bissli/libb-date.git", rev = "master" }
-# == db
 sqlalchemy = { version = "^2.0.27", extras = ["postgresql-psycopg2binary", "postgresql-psycopgbinary", "mssql-pymssql"] }
+
+libb-util = { git = "https://github.com/bissli/libb-util" }
+libb-date = { git = "https://github.com/bissli/libb-date" }
+
 # == test
 asserts = { version = "*", optional = true }
 pytest = { version = "*", optional = true }
-pdbpp = { git = "https://github.com/pdbpp/pdbpp.git", rev = "master", optional = true }
+pdbpp = { git = "https://github.com/pdbpp/pdbpp", optional = true }
+docker = { version = "*", optional = true }
 
 [tool.poetry.extras]
 test = [
   "asserts",
   "pdbpp",
   "pytest",
+  "docker",
 ]
 
 [build-system]
