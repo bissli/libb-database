@@ -10,7 +10,7 @@ __all__ = [
     'insert',
     'update',
     'insert_row',
-    'insert_row_sql',
+    'insert_rows',
     'select',
     'select_column',
     'select_column_unique',
@@ -20,5 +20,4 @@ __all__ = [
     'select_scalar_or_none',
     'update_or_insert',
     'update_row',
-    'update_row_sql',
     ]

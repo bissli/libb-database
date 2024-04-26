@@ -455,7 +455,7 @@ def select_row(cn, sql, *args):
 def select_row_or_none(cn, sql, *args):
     rows = select(cn, sql, *args)
     if len(rows) == 1:
-        return rows[0]
+        return rows.iloc[0]
     return None
 
 
@@ -467,8 +467,8 @@ def select_scalar(cn, sql, *args):
 
 def select_scalar_or_none(cn, sql, *args):
     row = select_row_or_none(cn, sql, *args)
-    if row:
-        return row[list(row.keys())[0]]
+    if len(row):
+        return row.iloc[0]
     return None
 
 
@@ -640,7 +640,7 @@ where
 #
 
 def insert_rows(cn, table, rows: list[dict]):
-    sql = ';\n'.join([_insert_row_sql(table, list(row.keys())) for row in rows])+';'
+    sql = ';\n'.join([insert_row_sql(table, list(row.keys())) for row in rows])+';'
     vals = list(flatten([list(d.values()) for d in rows]))
     return insert(cn, sql, *vals)
 
@@ -693,30 +693,6 @@ from
     else:
         execute(cn, sql)
     logger.debug(f'Reset sequence for {table=}')
-
-
-__all__ = [
-    'Options',
-    'transaction',
-    'callproc',
-    'connect',
-    'execute',
-    'delete',
-    'insert',
-    'update',
-    'insert_row',
-    'insert_row_sql',
-    'select',
-    'select_column',
-    'select_column_unique',
-    'select_row',
-    'select_row_or_none',
-    'select_scalar',
-    'select_scalar_or_none',
-    'update_or_insert',
-    'update_row',
-    'update_row_sql',
-    ]
 
 
 if __name__ == '__main__':
