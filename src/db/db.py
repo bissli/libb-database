@@ -1,12 +1,22 @@
 import atexit
-import contextlib
 import logging
+import re
 import sqlite3
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, fields
 from functools import wraps
+from numbers import Number
+from typing import Any
 
+import numpy as np
 import pandas as pd
+import psycopg
+import psycopg2
+import pymssql
+from more_itertools import flatten
+from psycopg.types.datetime import DateLoader, TimestampLoader
+from psycopg.types.datetime import TimestamptzLoader
 from sqlalchemy import URL, create_engine
 
 from date import Date, DateTime
@@ -14,60 +24,128 @@ from libb import ConfigOptions, collapse, load_options, scriptname
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    'Options',
+    'transaction',
+    'callproc',
+    'connect',
+    'execute',
+    'delete',
+    'insert',
+    'update',
+    'insert_row',
+    'insert_row_sql',
+    'select',
+    'select_column',
+    'select_column_unique',
+    'select_row',
+    'select_row_or_none',
+    'select_scalar',
+    'select_scalar_or_none',
+    'update_or_insert',
+    'update_row',
+    'update_row_sql',
+    ]
+
+
 CONNECTIONOBJ = []
 
 
-with contextlib.suppress(ImportError):
-    import psycopg
-    from psycopg.types.datetime import DateLoader, TimestampLoader
-    from psycopg.types.datetime import TimestamptzLoader
+# == psycopg
 
-    class DateMixin:
-        def load(self, data): return Date(super().load(data))
-    class DateTimeMixin:
-        def load(self, data): return DateTime(super().load(data))
-    class DateTimeTzMixin:
-        def load(self, data): return DateTime(super().load(data))
-
-    class CustomDateLoader(DateMixin, DateLoader): pass
-    class CustomDateTimeLoader(DateTimeMixin, TimestampLoader): pass
-    class CustomDateTimeTzLoader(DateTimeTzMixin, TimestamptzLoader): pass
-
-    psycopg.adapters.register_loader('date', CustomDateLoader)
-    psycopg.adapters.register_loader('timestamp', CustomDateTimeLoader)
-    psycopg.adapters.register_loader('timestamptz', CustomDateTimeTzLoader)
-
-    CONNECTIONOBJ.append(psycopg.Connection)
+# loaders that overwrite default behavior and return date objects
+class DateMixin:
+    def load(self, data): return Date(super().load(data))
 
 
-with contextlib.suppress(ImportError):
-    import psycopg2
-
-    DATE = psycopg2.extensions.new_type(
-        psycopg2.extensions.DATE.values+psycopg2.extensions.PYDATE.values,
-        'DATE', lambda val, cur: Date(val))
-    DATETIME = psycopg2.extensions.new_type(
-        psycopg2.DATETIME.values+psycopg2.extensions.PYDATETIME.values,
-        'DATETIME', lambda val, cur: DateTime(val))
-    psycopg2.extensions.register_type(DATE)
-    psycopg2.extensions.register_type(DATETIME)
-
-    CONNECTIONOBJ.append(psycopg2.extensions.connection)
+class DateTimeMixin:
+    def load(self, data): return DateTime(super().load(data))
 
 
-with contextlib.suppress(ImportError):
-    import pymssql
-
-    CONNECTIONOBJ.append(pymssql.Connection)
+class DateTimeTzMixin:
+    def load(self, data): return DateTime(super().load(data))
 
 
-CONNECTIONOBJ = tuple(CONNECTIONOBJ)
+# register custom loaders
+class CustomDateLoader(DateMixin, DateLoader): pass
+
+
+class CustomDateTimeLoader(DateTimeMixin, TimestampLoader): pass
+
+
+class CustomDateTimeTzLoader(DateTimeTzMixin, TimestamptzLoader): pass
+
+
+psycopg.adapters.register_loader('date', CustomDateLoader)
+psycopg.adapters.register_loader('timestamp', CustomDateTimeLoader)
+psycopg.adapters.register_loader('timestamptz', CustomDateTimeTzLoader)
+
+# custom errors
+PgIntegrityError = psycopg.IntegrityError
+PgUniqueViolation = psycopg.errors.UniqueViolation
+PgProgrammingError = psycopg.ProgrammingError
+
+# == psycopg2
+
+# register custom loaders
+DATE = psycopg2.extensions.new_type(
+    psycopg2.extensions.DATE.values+psycopg2.extensions.PYDATE.values,
+    'DATE', lambda val, cur: Date(val))
+DATETIME = psycopg2.extensions.new_type(
+    psycopg2.DATETIME.values+psycopg2.extensions.PYDATETIME.values,
+    'DATETIME', lambda val, cur: DateTime(val))
+psycopg2.extensions.register_type(DATE)
+psycopg2.extensions.register_type(DATETIME)
+
+# custom typemap
+PGTYPEMAP = {}
+for v in psycopg2.STRING.values + psycopg2.extensions.UNICODE.values:
+    PGTYPEMAP[v] = str
+for v in psycopg2.extensions.INTEGER.values + psycopg2.extensions.LONGINTEGER.values:
+    PGTYPEMAP[v] = np.int64
+for v in psycopg2.extensions.FLOAT.values + psycopg2.extensions.DECIMAL.values:
+    PGTYPEMAP[v] = np.float64
+for v in psycopg2.extensions.DATE.values + psycopg2.extensions.PYDATE.values:
+    PGTYPEMAP[v] = Date
+for v in psycopg2.DATETIME.values + psycopg2.extensions.PYDATETIME.values:
+    PGTYPEMAP[v] = DateTime
+for v in psycopg2.BINARY.values + psycopg2.extensions.BOOLEAN.values:
+    PGTYPEMAP[v] = bool
+for v in (
+    psycopg2.extensions.BINARYARRAY.values
+    + psycopg2.extensions.BOOLEANARRAY.values
+    + psycopg2.extensions.INTEGERARRAY.values
+    + psycopg2.extensions.FLOATARRAY.values
+    + psycopg2.extensions.LONGINTEGERARRAY.values
+    + psycopg2.extensions.DATEARRAY.values
+    + psycopg2.extensions.DATETIMEARRAY.values
+    + psycopg2.extensions.DECIMALARRAY.values
+    + psycopg2.extensions.STRINGARRAY.values
+):
+    PGTYPEMAP[v] = list
+for v in (17,):   # BYTEA
+    PGTYPEMAP[v] = bytes
+
+# == pymssql
+
+# custom errors
+ProgrammingError = pymssql.DatabaseError
+IntegrityError = pymssql.IntegrityError
+GeneralError = pymssql.Error
+OperationalError = pymssql.OperationalError
+
+# == sqlite3
+
+# nothing yet
+
+
+CONNECTIONOBJ = (psycopg.Connection, psycopg2.extensions.connection, pymssql.Connection)
 
 
 def isconnection(cn):
     """Utility to test for the presence of a mock connection
 
-    >>> cn = __POSTGRES_CONNECTION('postgresql+psycopg')
+    >>> cn = __POSTGRES_CONNECTION()
     >>> isconnection(cn)
     True
     >>> isconnection('mock')
@@ -132,14 +210,25 @@ class CursorWrapper:
         created this connection.
         """
         start = time.time()
-        logger.debug('SQL:\n%s\nargs: %s\nkwargs: %s' % (sql, str(args), str(kwargs)))
-        self.cursor.execute(sql, *args, **kwargs)
+        logger.debug(f'SQL:\n{sql}\nargs: {str(args)}\nkwargs: {str(kwargs)}')
+        if isinstance(self.connwrapper.connection, pymssql.Connection):
+            logger.debug(f'SQL:\n{sql}\nargs: {str(args)}\nkwargs: {str(kwargs)}')
+            self.cursor.execute(sql, *args, **kwargs)
+        elif isinstance(self.connwrapper.connection, psycopg.Connection):
+            for arg in collapse(args):
+                if isinstance(arg, dict):
+                    logger.debug('SQL:\n' + self.cursor.mogrify(sql, arg).decode())
+                    self.cursor.execute(sql, arg)
+                    break
+            else:
+                logger.debug('SQL:\n' + self.cursor.mogrify(sql, *args).decode())
+                self.cursor.execute(sql, *args)
         end = time.time()
         self.connwrapper.addcall(end - start)
         logger.debug('Query time=%f' % (end - start))
 
 
-def logsql(func):
+def dumpsql(func):
     """This is a decorator for db module functions, for logging data flowing down to driver"""
     @wraps(func)
     def wrapper(cn, sql, *args, **kwargs):
@@ -152,10 +241,44 @@ def logsql(func):
     return wrapper
 
 
+def _page_mssql(sql, order_by, offset, limit):
+    """Wrap a MSSQL stmt in sql server windowing notation, strip existing order by"""
+    if isinstance(order_by, list | tuple):
+        order_by = ','.join(order_by)
+    match = re.search('order by', sql, re.IGNORECASE)
+    if match:
+        sql = sql[: match.start()]
+    logger.info(f'Paged MSSQL statement with {order_by} {offset} {limit}')
+    return f"""
+{sql}
+ORDER BY {order_by}
+OFFSET {offset} ROWS
+FETCH NEXT {limit} ROWS ONLY"""
+
+
+def _page_pgsql(sql, order_by, offset, limit):
+    """Wrap a Postgres SQL stmt in sql server windowing notation, strip existing order by"""
+    if isinstance(order_by, list | tuple):
+        order_by = ','.join(order_by)
+    match = re.search('order by', sql, re.IGNORECASE)
+    if match:
+        sql = sql[: match.start()]
+    logger.info(f'Paged Postgres statement with {order_by} {offset} {limit}')
+    return f"""
+{sql}
+ORDER BY {order_by}
+LIMIT {limit} OFFSET {offset}"""
+
+
 @dataclass
 class Options(ConfigOptions):
+    """Options
 
-    drivername: str = 'postgresql+psycopg'
+    supported driver names: `postgres`, `sqlserver`, `sqlite`
+
+    """
+
+    drivername: str = 'postgres'
     hostname: str = None
     username: str = None
     password: str = None
@@ -168,7 +291,7 @@ class Options(ConfigOptions):
     def __post_init__(self):
         self.appname = self.appname or scriptname() or 'python_console'
         for field in fields(self):
-            assert getattr(self, field.name)
+            assert getattr(self, field.name), f'field {field.name} cannot be None or 0'
 
 
 @load_options(cls=Options)
@@ -185,15 +308,25 @@ def connect(options: str | dict | Options | None, config=None, **kw):
     cn = connect(dbengine='foo', hostname='bar', ...)
     ...
 
-    >>> cn = __POSTGRES_CONNECTION('postgresql+psycopg')
+    >>> cn = __POSTGRES_CONNECTION()
     >>> df = select(cn, __POSTGRES_TEST_QUERY())
     >>> assert len(df.columns) == 2
     >>> assert len(df) > 10
     """
+    if isinstance(options, Options):
+        for field in fields(options):
+            kw.pop(field.name, None)
     if options.drivername == 'sqlite':
         conn = create_engine(f'sqlite:///{options.database}', **kw)
     else:
-        url = URL.create(options.drivername,
+        match options.drivername:
+            case 'postgres':
+                driver = 'postgresql+psycopg'
+            case 'sqlserver':
+                driver = 'mysql+pymysql'
+            case _:
+                raise AttributeError(f'{options.drivername} is not supported, see Options docstring')
+        url = URL.create(driver,
                          username=options.username,
                          password=options.password,
                          host=options.hostname,
@@ -218,14 +351,14 @@ def IterChunk(cursor, size=5000):
         yield from chunked
 
 
-@logsql
+@dumpsql
 def select(cn, sql, *args, **kwargs) -> pd.DataFrame:
     cursor = _dict_cur(cn)
     cursor.execute(sql, args)
     return create_dataframe(cursor, **kwargs)
 
 
-@logsql
+@dumpsql
 def callproc(cn, sql, *args, **kwargs) -> pd.DataFrame:
     """Just like select above but used for stored procs which
     often return multiple resultsets because of nocount being
@@ -238,16 +371,29 @@ def callproc(cn, sql, *args, **kwargs) -> pd.DataFrame:
     return create_dataframe(cursor, **kwargs)
 
 
+class DictRowFactory:
+    """Rough equivalent of psycopg2.extras.RealDictCursor"""
+
+    def __init__(self, cursor: psycopg.Cursor[Any]):
+        self.fields = [(c.name, PGTYPEMAP.get(c.type_code)) for c in (cursor.description or [])]
+
+    def __call__(self, values: Sequence[Any]) -> dict[str, Any]:
+        return {name: cast(value)
+                if isinstance(value, Number)
+                else value
+                for (name, cast), value in zip(self.fields, values)}
+
+
 def _dict_cur(cn):
     typ = type(cn.connection.connection)
-    with contextlib.suppress(NameError):
-        if typ == psycopg2.extensions.connection: return cn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    with contextlib.suppress(NameError):
-        if typ == psycopg.Connection: return cn.cursor(row_factory=psycopg.rows.dict_row)
-    with contextlib.suppress(NameError):
-        if typ == pymssql.Connection: return cn.cursor(as_dict=True)
-    with contextlib.suppress(NameError):
-        if typ == sqlite3.Connection: return cn.cursor()
+    if typ == psycopg2.extensions.connection:
+        return cn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    if typ == psycopg.Connection:
+        return cn.cursor(row_factory=DictRowFactory)
+    if typ == pymssql.Connection:
+        return cn.cursor(as_dict=True)
+    if typ == sqlite3.Connection:
+        return cn.cursor()
     raise ValueError('Unknown connection type')
 
 
@@ -255,18 +401,15 @@ def create_dataframe(cursor) -> pd.DataFrame:
     """Create a dataframe from the raw rows, column names and column types"""
 
     def is_psycopg(cursor):
-        with contextlib.suppress(NameError):
-            if isinstance(cursor.connection, psycopg2.extensions.connection):
-                return True
-        with contextlib.suppress(NameError):
-            if isinstance(cursor.connection, psycopg.Connection):
-                return True
+        if isinstance(cursor.connection, psycopg2.extensions.connection):
+            return True
+        if isinstance(cursor.connection, psycopg.Connection):
+            return True
         return False
 
     def is_pymsql(cursor):
-        with contextlib.suppress(NameError):
-            if isinstance(cursor.connection, pymssql.Connection):
-                return True
+        if isinstance(cursor.connection, pymssql.Connection):
+            return True
         return False
 
     if is_psycopg(cursor):
@@ -286,7 +429,7 @@ def select_column(cn, sql, *args):
     """When we query a single select parameter, return just
     that dataframe column.
 
-    >>> cn = __POSTGRES_CONNECTION('postgresql+psycopg')
+    >>> cn = __POSTGRES_CONNECTION()
     >>> df = select_column(cn, __POSTGRES_TEST_QUERY(1))
     >>> assert isinstance(df, pd.Series)
     >>> assert len(df) > 10
@@ -326,7 +469,7 @@ def select_scalar_or_none(cn, sql, *args):
     return None
 
 
-@logsql
+@dumpsql
 def execute(cn, sql, *args):
     cursor = cn.cursor()
     cursor.execute(sql, args)
@@ -345,7 +488,7 @@ class transaction:
         tx.execute('delete from ...', args)
         tx.execute('update from ...', args)
 
-    >>> cn = __POSTGRES_CONNECTION('postgresql+psycopg2')
+    >>> cn = __POSTGRES_CONNECTION()
     >>> with transaction(cn) as tx:
     ...     df = tx.select(__POSTGRES_TEST_QUERY())
     >>> assert len(df.columns) == 2
@@ -367,24 +510,24 @@ class transaction:
             self.cn.commit()
             logger.debug('Committed transaction.')
 
-    @logsql
+    @dumpsql
     def execute(self, sql, *args, **kwargs):
         self.cursor.execute(sql, args)
         return self.cursor.rowcount
 
-    @logsql
+    @dumpsql
     def select(self, sql, *args, **kwargs) -> pd.DataFrame:
         cursor = self.cursor
         cursor.execute(sql, args)
         return create_dataframe(cursor, **kwargs)
 
-    @logsql
+    @dumpsql
     def select_scalar(self, cn, sql, *args):
         col = select_column(cn, sql, *args)
         return col[list(col.keys())[0]]
 
 
-@logsql
+@dumpsql
 def insert_identity(cn, sql, *args):
     """Inject @@identity column into query for row by row unique id"""
     cursor=cn.cursor()
@@ -452,8 +595,8 @@ where
     upd_cols=key_cols and [c for c in df.cols if c not in key_cols]
     if upd_cols:
         coalesce=(
-            lambda t, c: '{c}=coalesce({t}.{c}, excluded.{c})'.format(t=t, c=c)
-            if c in upd_only_none_cols else '{c}=excluded.{c}'.format(c=c)
+            lambda t, c: f'{c}=coalesce({t}.{c}, excluded.{c})'
+            if c in upd_only_none_cols else f'{c}=excluded.{c}'
         )
         conflict = 'on conflict ({}) do update set \n{}'.format(
             '\n,'.join(key_cols), ', '.join([coalesce(table, c) for c in upd_cols])
@@ -469,7 +612,7 @@ where
     {values}
     {conflict}
     """
-    vals = list(collapse(list(df.unwind(*df.cols))))
+    vals = list(flatten(list(df.unwind(*df.cols))))
     try:
         with transaction(cn) as tx:
             rc = tx.execute(sql, *vals)
@@ -539,31 +682,17 @@ from
     logger.debug(f'Reset sequence for {table=}')
 
 
-__all__ = [
-    'Options',
-    'transaction',
-    'callproc',
-    'connect',
-    'execute',
-    'delete',
-    'insert',
-    'update',
-    'insert_row',
-    'insert_row_sql',
-    'select',
-    'select_column',
-    'select_column_unique',
-    'select_row',
-    'select_row_or_none',
-    'select_scalar',
-    'select_scalar_or_none',
-    'update_or_insert',
-    'update_row',
-    'update_row_sql',
-    ]
-
-
 if __name__ == '__main__':
+    import os
+    import site
+
+    from libb import expandabspath
+
+    HERE = os.path.dirname(os.path.abspath(__file__))
+    TEST = expandabspath(os.path.join(HERE, '../../tests/fixtures'))
+    site.addsitedir(TEST)
+    from server import psql_docker_container
+
     def __POSTGRES_TEST_QUERY(numcols=2):
         sql="""
 select
@@ -579,15 +708,24 @@ where
         if numcols==2:
             return sql.format('a.attname as column,', 'format_type(a.atttypid, a.atttypmod) as type')
 
-    def __POSTGRES_CONNECTION(driver='postgresql+psycopg'):
-        import os
+    def __POSTGRES_CONNECTION():
         param = {
-            'drivername': driver,
-            'username': os.getenv('PGUSER'),
-            'password': os.getenv('PGPASSWORD'),
-            'database': os.getenv('PGDATABASE'),
-            'hostname': os.getenv('PGHOST'),
+            'drivername': 'postgres',
+            'username': 'postgres',
+            'password': 'password',
+            'database': 'test_db',
+            'hostname': 'localhost',
             'port': 5432,
+            'timeout': 30,
             }
         return connect(**param)
-    __import__('doctest').testmod(optionflags=4 | 8 | 32)
+
+    container = psql_docker_container()
+    try:
+        cn = __POSTGRES_CONNECTION()
+        print(select(cn, 'select now()'))
+        __import__('pdb').set_trace()
+        import doctest
+        doctest.testmod(optionflags=4 | 8 | 32)
+    finally:
+        container.stop()
