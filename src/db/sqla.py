@@ -1,11 +1,29 @@
 """Go through https://github.com/sqlalchemy/sqlalchemy/wiki/UsageRecipes
 Test recipes and add
 """
+from __future__ import annotations
+
+import typing
+from typing import Any, Iterator
+
+from sqlalchemy import and_, func, select
+from sqlalchemy.orm import Session
+
+if typing.TYPE_CHECKING:
+    from sqlalchemy import Result
+    from sqlalchemy import Select
+    from sqlalchemy import SQLColumnExpression
+
+import typing
+
+if typing.TYPE_CHECKING:
+    from sqlalchemy import Result
+    from sqlalchemy import Select
+    from sqlalchemy import SQLColumnExpression
 
 import logging
 from math import ceil
 
-from sqlalchemy import and_, func
 from sqlalchemy.engine import reflection
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.schema import DropConstraint, DropTable, ForeignKeyConstraint
@@ -52,51 +70,68 @@ def drop_everything(engine):
 #
 
 
-def column_windows(session, column, windowsize, where=None):
+def column_windows(
+    session: Session,
+    stmt: Select[Any],
+    column: SQLColumnExpression[Any],
+    windowsize: int,
+) -> Iterator[SQLColumnExpression[bool]]:
     """Return a series of WHERE clauses against
     a given column that break it into windows.
 
-    Result is an iterable of tuples, consisting of
-    ((start, end), whereclause), where (start, end) are the ids.
+    Result is an iterable of WHERE clauses that are packaged with
+    the individual ranges to select from.
 
     Requires a database that supports window functions,
     i.e. Postgresql, SQL Server, Oracle.
 
-    via zzzeek [link][https://bitbucket.org/zzzeek/sqlalchemy/wiki/UsageRecipes/WindowedRangeQuery]
+    via zzzeek [link][https://github.com/sqlalchemy/sqlalchemy/wiki/RangeQuery-and-WindowedRangeQuery]
     """
 
-    def int_for_range(start_id, end_id):
-        if end_id:
-            return and_(column >= start_id, column < end_id)
-        else:
-            return column >= start_id
+    rownum = func.row_number().over(order_by=column).label('rownum')
 
-    q = session.query(column, func.row_number().over(order_by=column).label('rownum'))
-    if where is not None:
-        q = q.filter(where)
+    subq = stmt.add_columns(rownum).subquery()
+    subq_column = list(subq.columns)[-1]
 
-    q = q.from_self(column)
+    target_column = subq.corresponding_column(column)
+    new_stmt = select(target_column)
 
     if windowsize > 1:
-        q = q.filter('rownum %% %d=1' % windowsize)
+        new_stmt = new_stmt.filter(subq_column % windowsize == 1)
 
-    column_intervals = [column_val for column_val, in q]
+    """
+    # the SQL statement here is intended to give us a list of ranges,
+    # and looks like:
 
-    while column_intervals:
-        start = column_intervals.pop(0)
-        if column_intervals:
-            end = column_intervals[0]
+    SELECT anon_1.data
+    FROM (SELECT widget.id AS id, widget.data AS data, row_number() OVER (ORDER BY widget.data) AS rownum
+    FROM widget) AS anon_1
+    WHERE anon_1.rownum %% %(rownum_1)s = %(param_1)s
+    """
+
+    intervals = list(session.scalars(new_stmt))
+
+    # yield out WHERE clauses for each range
+    while intervals:
+        start = intervals.pop(0)
+        if intervals:
+            yield and_(column >= start, column < intervals[0])
         else:
-            end = None
-        print(('window', start, end))
-        yield int_for_range(start, end)
+            yield column >= start
 
 
-def windowed_query(q, column, windowsize, where=None):
-    """Break a Query into windows on a given column."""
-    for whereclause in column_windows(q.session, column, windowsize, where):
-        for row in q.filter(whereclause).order_by(column):
-            yield row
+def windowed_query(
+    session: Session,
+    stmt: Select[Any],
+    column: SQLColumnExpression[Any],
+    windowsize: int,
+) -> Iterator[Result[Any]]:
+    """Given a Session and Select() object, organize and execute the statement
+    such that it is invoked for ordered chunks of the total result.   yield
+    out individual Result objects for each chunk.
+    """
+    for whereclause in column_windows(session, stmt, column, windowsize):
+        yield session.execute(stmt.filter(whereclause).order_by(column))
 
 
 class Pagination:
