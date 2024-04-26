@@ -34,7 +34,7 @@ __all__ = [
     'insert',
     'update',
     'insert_row',
-    'insert_row_sql',
+    'insert_rows',
     'select',
     'select_column',
     'select_column_unique',
@@ -44,11 +44,7 @@ __all__ = [
     'select_scalar_or_none',
     'update_or_insert',
     'update_row',
-    'update_row_sql',
     ]
-
-
-CONNECTIONOBJ = []
 
 
 # == psycopg
@@ -241,6 +237,20 @@ def dumpsql(func):
     return wrapper
 
 
+def placeholder(func):
+    """Handle placeholder by connection type"""
+    @wraps(func)
+    def wrapper(cn, sql, *args, **kwargs):
+        if isinstance(cn.connection, psycopg.Connection):
+            sql = sql.replace('?', '%s')
+        if isinstance(cn.connection, pymssql.Connection):
+            sql = sql.replace('%s', '?')
+        if isinstance(cn.connection, sqlite3.Connection):
+            sql = sql.replace('%s', '?')
+        return func(cn, sql, *args, **kwargs)
+    return wrapper
+
+
 def _page_mssql(sql, order_by, offset, limit):
     """Wrap a MSSQL stmt in sql server windowing notation, strip existing order by"""
     if isinstance(order_by, list | tuple):
@@ -352,6 +362,7 @@ def IterChunk(cursor, size=5000):
 
 
 @dumpsql
+@placeholder
 def select(cn, sql, *args, **kwargs) -> pd.DataFrame:
     cursor = _dict_cur(cn)
     cursor.execute(sql, args)
@@ -359,6 +370,7 @@ def select(cn, sql, *args, **kwargs) -> pd.DataFrame:
 
 
 @dumpsql
+@placeholder
 def callproc(cn, sql, *args, **kwargs) -> pd.DataFrame:
     """Just like select above but used for stored procs which
     often return multiple resultsets because of nocount being
@@ -397,24 +409,8 @@ def _dict_cur(cn):
 
 def create_dataframe(cursor) -> pd.DataFrame:
     """Create a dataframe from the raw rows, column names and column types"""
-
-    def is_psycopg(cursor):
-        return isinstance(cursor.connection, psycopg.Connection)
-
-    def is_pymsql(cursor):
-        return isinstance(cursor.connection, pymssql.Connection)
-
-    if is_psycopg(cursor):
-        data = cursor.fetchall()
-        return pd.DataFrame(data)
-    if is_pymsql(cursor):
-        data = cursor.fetchall()
-        cols=[_[0] for _ in cursor.description]
-        return pd.DataFrame.from_records(list(cursor), columns=cols)
-    if isinstance(cursor.connection, sqlite3.Connection):
-        cols = [column[0] for column in cursor.description]
-        data = cursor.fetchall()
-        return pd.DataFrame.from_records(data=data, columns=cols)
+    data = cursor.fetchall()
+    return pd.DataFrame.from_records(list(data))
 
 
 def select_column(cn, sql, *args):
@@ -462,6 +458,7 @@ def select_scalar_or_none(cn, sql, *args):
 
 
 @dumpsql
+@placeholder
 def execute(cn, sql, *args):
     cursor = cn.cursor()
     cursor.execute(sql, args)
@@ -503,23 +500,27 @@ class transaction:
             logger.debug('Committed transaction.')
 
     @dumpsql
+    @placeholder
     def execute(self, sql, *args, **kwargs):
         self.cursor.execute(sql, args)
         return self.cursor.rowcount
 
     @dumpsql
+    @placeholder
     def select(self, sql, *args, **kwargs) -> pd.DataFrame:
         cursor = self.cursor
         cursor.execute(sql, args)
         return create_dataframe(cursor, **kwargs)
 
     @dumpsql
+    @placeholder
     def select_scalar(self, cn, sql, *args):
         col = select_column(cn, sql, *args)
         return col[list(col.keys())[0]]
 
 
 @dumpsql
+@placeholder
 def insert_identity(cn, sql, *args):
     """Inject @@identity column into query for row by row unique id"""
     cursor=cn.cursor()
@@ -623,11 +624,16 @@ where
 # SQL helpers
 #
 
+def insert_rows(cn, table, rows: list[dict]):
+    sql = ';\n'.join([_insert_row_sql(table, list(row.keys())) for row in rows])+';'
+    vals = list(flatten([list(d.values()) for d in rows]))
+    return insert(cn, sql, *vals)
+
 
 def insert_row(cn, table, fields, values):
     """Insert a row into a table using the supplied list of fields and values."""
     assert len(fields) == len(values), 'fields must be same length as values'
-    return insert_identity(cn, insert_row_sql(table, fields), *values)
+    return insert(cn, insert_row_sql(table, fields), *values)
 
 
 def insert_row_sql(table, fields):
