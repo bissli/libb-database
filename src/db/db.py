@@ -139,7 +139,7 @@ OperationalError = pymssql.OperationalError
 # nothing yet
 
 
-CONNECTIONOBJ = (psycopg.Connection, psycopg2.extensions.connection, pymssql.Connection)
+CONNECTIONOBJ = (psycopg.Connection, pymssql.Connection)
 
 
 def isconnection(cn):
@@ -372,8 +372,8 @@ def callproc(cn, sql, *args, **kwargs) -> pd.DataFrame:
 
 
 class DictRowFactory:
-    """Rough equivalent of psycopg2.extras.RealDictCursor"""
-
+    """Rough equivalent of psycopg2.extras.RealDictCursor
+    """
     def __init__(self, cursor: psycopg.Cursor[Any]):
         self.fields = [(c.name, PGTYPEMAP.get(c.type_code)) for c in (cursor.description or [])]
 
@@ -386,8 +386,6 @@ class DictRowFactory:
 
 def _dict_cur(cn):
     typ = type(cn.connection.connection)
-    if typ == psycopg2.extensions.connection:
-        return cn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     if typ == psycopg.Connection:
         return cn.cursor(row_factory=DictRowFactory)
     if typ == pymssql.Connection:
@@ -401,16 +399,10 @@ def create_dataframe(cursor) -> pd.DataFrame:
     """Create a dataframe from the raw rows, column names and column types"""
 
     def is_psycopg(cursor):
-        if isinstance(cursor.connection, psycopg2.extensions.connection):
-            return True
-        if isinstance(cursor.connection, psycopg.Connection):
-            return True
-        return False
+        return isinstance(cursor.connection, psycopg.Connection)
 
     def is_pymsql(cursor):
-        if isinstance(cursor.connection, pymssql.Connection):
-            return True
-        return False
+        return isinstance(cursor.connection, pymssql.Connection)
 
     if is_psycopg(cursor):
         data = cursor.fetchall()
