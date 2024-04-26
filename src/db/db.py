@@ -15,12 +15,12 @@ import psycopg
 import psycopg2
 import pymssql
 from more_itertools import flatten
+from psycopg import ClientCursor
 from psycopg.types.datetime import DateLoader, TimestampLoader
 from psycopg.types.datetime import TimestamptzLoader
-from sqlalchemy import URL, create_engine
 
 from date import Date, DateTime
-from libb import ConfigOptions, collapse, load_options, scriptname
+from libb import ConfigOptions, load_options, scriptname
 
 logger = logging.getLogger(__name__)
 
@@ -206,19 +206,9 @@ class CursorWrapper:
         created this connection.
         """
         start = time.time()
-        logger.debug(f'SQL:\n{sql}\nargs: {str(args)}\nkwargs: {str(kwargs)}')
-        if isinstance(self.connwrapper.connection, pymssql.Connection):
+        if isinstance(self.connwrapper.connection.connection, pymssql.Connection | sqlite3.Connection):
             logger.debug(f'SQL:\n{sql}\nargs: {str(args)}\nkwargs: {str(kwargs)}')
-            self.cursor.execute(sql, *args, **kwargs)
-        elif isinstance(self.connwrapper.connection, psycopg.Connection):
-            for arg in collapse(args):
-                if isinstance(arg, dict):
-                    logger.debug('SQL:\n' + self.cursor.mogrify(sql, arg).decode())
-                    self.cursor.execute(sql, arg)
-                    break
-            else:
-                logger.debug('SQL:\n' + self.cursor.mogrify(sql, *args).decode())
-                self.cursor.execute(sql, *args)
+        self.cursor.execute(sql, *args, **kwargs)
         end = time.time()
         self.connwrapper.addcall(end - start)
         logger.debug('Query time=%f' % (end - start))
@@ -304,6 +294,17 @@ class Options(ConfigOptions):
             assert getattr(self, field.name), f'field {field.name} cannot be None or 0'
 
 
+class LoggingCursor(ClientCursor):
+    """See https://github.com/psycopg/psycopg/discussions/153 if
+    considering replacing raw connections with SQLAlchemy
+    """
+    def execute(self, query, params=None):
+        formatted = self.mogrify(query, params)
+        logger.debug('SQL:\n' + formatted)
+        result = super().execute(query, params)
+        return result
+
+
 @load_options(cls=Options)
 def connect(options: str | dict | Options | None, config=None, **kw):
     """Database connection wrapper
@@ -326,24 +327,38 @@ def connect(options: str | dict | Options | None, config=None, **kw):
     if isinstance(options, Options):
         for field in fields(options):
             kw.pop(field.name, None)
+    conn = None
     if options.drivername == 'sqlite':
-        conn = create_engine(f'sqlite:///{options.database}', **kw)
-    else:
-        match options.drivername:
-            case 'postgres':
-                driver = 'postgresql+psycopg'
-            case 'sqlserver':
-                driver = 'mysql+pymysql'
-            case _:
-                raise AttributeError(f'{options.drivername} is not supported, see Options docstring')
-        url = URL.create(driver,
-                         username=options.username,
-                         password=options.password,
-                         host=options.hostname,
-                         database=options.database,
-                         port=options.port)
-        conn = create_engine(url, **kw)
-    return ConnectionWrapper(conn.raw_connection(), options.cleanup)
+        conn = sqlite3.connect(
+            database=options.database,
+            host=options.hostname,
+            application_name=options.appname,
+            user=options.username,
+            password=options.password,
+        )
+    if options.drivername == 'postgres':
+        conn = psycopg.connect(
+            dbname=options.database,
+            host=options.hostname,
+            user=options.username,
+            password=options.password,
+            port=options.port,
+            connect_timeout=options.timeout,
+            cursor_factory=LoggingCursor
+        )
+    if options.drivername == 'sqlserver':
+        conn = pymssql.connect(
+            database=options.database,
+            user=options.username,
+            server=options.hostname,
+            password=options.password,
+            appname=options.appname,
+            timeout=options.timeout,
+            port=options.port,
+        )
+    if not conn:
+        raise AttributeError(f'{options.drivername} is not supported, see Options docstring')
+    return ConnectionWrapper(conn, options.cleanup)
 
 
 def IterChunk(cursor, size=5000):
@@ -386,7 +401,7 @@ def callproc(cn, sql, *args, **kwargs) -> pd.DataFrame:
 class DictRowFactory:
     """Rough equivalent of psycopg2.extras.RealDictCursor
     """
-    def __init__(self, cursor: psycopg.Cursor[Any]):
+    def __init__(self, cursor: psycopg.ClientCursor[Any]):
         self.fields = [(c.name, PGTYPEMAP.get(c.type_code)) for c in (cursor.description or [])]
 
     def __call__(self, values: Sequence[Any]) -> dict[str, Any]:
@@ -680,6 +695,30 @@ from
     logger.debug(f'Reset sequence for {table=}')
 
 
+__all__ = [
+    'Options',
+    'transaction',
+    'callproc',
+    'connect',
+    'execute',
+    'delete',
+    'insert',
+    'update',
+    'insert_row',
+    'insert_row_sql',
+    'select',
+    'select_column',
+    'select_column_unique',
+    'select_row',
+    'select_row_or_none',
+    'select_scalar',
+    'select_scalar_or_none',
+    'update_or_insert',
+    'update_row',
+    'update_row_sql',
+    ]
+
+
 if __name__ == '__main__':
     import os
     import site
@@ -722,7 +761,6 @@ where
     try:
         cn = __POSTGRES_CONNECTION()
         print(select(cn, 'select now()'))
-        __import__('pdb').set_trace()
         import doctest
         doctest.testmod(optionflags=4 | 8 | 32)
     finally:

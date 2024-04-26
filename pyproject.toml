@@ -11,7 +11,11 @@ python = "~3.11"
 
 pandas = "*"
 numpy = "*"
-sqlalchemy = { version = "^2.0.27", extras = ["postgresql-psycopg2binary", "postgresql-psycopgbinary", "mssql-pymssql"] }
+psycopg = { extras = ["binary"], version = "*" }
+psycopg2 = { extras = ["binary"], version = "*" }
+psycopg-binary = "*"
+psycopg2-binary = "*"
+pymssql = '*'
 
 libb-util = { git = "https://github.com/bissli/libb-util" }
 libb-date = { git = "https://github.com/bissli/libb-date" }
