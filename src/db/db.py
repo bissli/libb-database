@@ -44,6 +44,7 @@ __all__ = [
     'select_scalar_or_none',
     'update_or_insert',
     'update_row',
+    'create_record'
     ]
 
 
@@ -138,6 +139,11 @@ OperationalError = pymssql.OperationalError
 CONNECTIONOBJ = (psycopg.Connection, pymssql.Connection)
 
 
+class AbstractRecord:
+    """Result from select operation needs to be patched in `create_record`
+    """
+
+
 def isconnection(cn):
     """Utility to test for the presence of a mock connection
 
@@ -157,6 +163,7 @@ class ConnectionWrapper:
     """Wraps a connection object so we can keep track of the
     calls and execution time of any cursors used by this connection.
       haq from https://groups.google.com/forum/?fromgroups#!topic/pyodbc/BVIZBYGXNsk
+    Can be used as a context manager ... with connect(...) as cn: pass
     """
 
     def __init__(self, connection, cleanup=True):
@@ -165,6 +172,12 @@ class ConnectionWrapper:
         self.time = 0
         if cleanup:
             atexit.register(self.cleanup)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.connection.close()
 
     def __getattr__(self, name):
         """Delegate any members to the underlying connection."""
@@ -378,15 +391,15 @@ def IterChunk(cursor, size=5000):
 
 @dumpsql
 @placeholder
-def select(cn, sql, *args, **kwargs) -> pd.DataFrame:
+def select(cn, sql, *args, **kwargs) -> AbstractRecord:
     cursor = _dict_cur(cn)
     cursor.execute(sql, args)
-    return create_dataframe(cursor, **kwargs)
+    return create_record(cursor, **kwargs)
 
 
 @dumpsql
 @placeholder
-def callproc(cn, sql, *args, **kwargs) -> pd.DataFrame:
+def callproc(cn, sql, *args, **kwargs) -> AbstractRecord:
     """Just like select above but used for stored procs which
     often return multiple resultsets because of nocount being
     off (each rowcount is a separate resultset). We walk through
@@ -395,7 +408,7 @@ def callproc(cn, sql, *args, **kwargs) -> pd.DataFrame:
     """
     cursor=_dict_cur(cn)
     cursor.execute(sql, args)
-    return create_dataframe(cursor, **kwargs)
+    return create_record(cursor, **kwargs)
 
 
 class DictRowFactory:
@@ -422,10 +435,10 @@ def _dict_cur(cn):
     raise ValueError('Unknown connection type')
 
 
-def create_dataframe(cursor) -> pd.DataFrame:
-    """Create a dataframe from the raw rows, column names and column types"""
-    data = cursor.fetchall()
-    return pd.DataFrame.from_records(list(data))
+def create_record(cursor) -> AbstractRecord:
+    """Patchable function (see `__init__.py`) that wraps raw
+    cursor with object
+    """
 
 
 def select_column(cn, sql, *args):
@@ -437,9 +450,12 @@ def select_column(cn, sql, *args):
     >>> assert isinstance(df, pd.Series)
     >>> assert len(df) > 10
     """
-    df = select(cn, sql, *args)
-    assert len(df.columns) == 1, 'Expected one col, got %d' % len(df.columns)
-    return df[df.columns[0]]
+    obj = select(cn, sql, *args)
+    if isinstance(obj, pd.DataFrame):
+        assert len(obj.columns) == 1, 'Expected one col, got %d' % len(obj.columns)
+        return obj[obj.columns[0]]
+    # assume iterdict
+    return [r[list(r.keys())[0]] for r in obj]
 
 
 def select_column_unique(cn, sql, *args):
@@ -447,28 +463,40 @@ def select_column_unique(cn, sql, *args):
 
 
 def select_row(cn, sql, *args):
-    rows = select(cn, sql, *args)
-    assert len(rows) == 1, 'Expected one row, got %d' % len(rows)
-    return rows[0]
+    obj = select(cn, sql, *args)
+    assert len(obj) == 1, 'Expected one row, got %d' % len(obj)
+    if isinstance(obj, pd.DataFrame):
+        return obj.iloc[0]
+    # assume iterdict
+    return obj[0]
 
 
 def select_row_or_none(cn, sql, *args):
-    rows = select(cn, sql, *args)
-    if len(rows) == 1:
-        return rows.iloc[0]
+    obj = select(cn, sql, *args)
+    if len(obj) == 1:
+        if isinstance(obj, pd.DataFrame):
+            return obj.iloc[0]
+        # assume iterdict
+        return obj[0]
     return None
 
 
 def select_scalar(cn, sql, *args):
-    df = select(cn, sql, *args)
-    assert len(df.index) == 1, 'Expected one row, got %d' % len(df.index)
-    return df[df.columns[0]].iloc[0]
+    obj = select(cn, sql, *args)
+    assert len(obj) == 1, 'Expected one col, got %d' % len(obj)
+    if isinstance(obj, pd.DataFrame):
+        return obj[obj.columns[0]].iloc[0]
+    # assume dict
+    return obj[list(obj.keys())[0]]
 
 
 def select_scalar_or_none(cn, sql, *args):
-    row = select_row_or_none(cn, sql, *args)
-    if len(row):
-        return row.iloc[0]
+    obj = select_row_or_none(cn, sql, *args)
+    if len(obj):
+        if isinstance(obj, pd.Series):
+            return obj.iloc[0]
+        # assume dict
+        return obj[list(obj.keys())[0]]
     return None
 
 
@@ -516,16 +544,30 @@ class transaction:
 
     @dumpsql
     @placeholder
-    def execute(self, sql, *args, **kwargs):
+    def execute(self, sql, *args, returnid=None):
         self.cursor.execute(sql, args)
-        return self.cursor.rowcount
+        if not returnid:
+            return self.cursor.rowcount
+        else:
+            result = None
+            try:
+                result = self.cursor.fetchone()
+            except:
+                logger.warning('No results to return')
+            finally:
+                if not result:
+                    return
+            if isinstance(returnid, list | tuple):
+                return [result[r] for r in returnid]
+            else:
+                return result[returnid]
 
     @dumpsql
     @placeholder
-    def select(self, sql, *args, **kwargs) -> pd.DataFrame:
+    def select(self, sql, *args, **kwargs) -> AbstractRecord:
         cursor = self.cursor
         cursor.execute(sql, args)
-        return create_dataframe(cursor, **kwargs)
+        return create_record(cursor, **kwargs)
 
     @dumpsql
     @placeholder
@@ -551,16 +593,16 @@ def insert_identity(cn, sql, *args):
 def update_or_insert(cn, update_sql, insert_sql, *args):
     """TODO: better way to do this query is with postgres on conflict do ..."""
     with transaction(cn) as tx:
-        rc=tx.execute(update_sql, args)
+        rc = tx.execute(update_sql, args)
         logger.info(f'Updated {rc} rows')
         if rc:
             return rc
-        rc=tx.execute(insert_sql, args)
+        rc = tx.execute(insert_sql, args)
         logger.info(f'Inserted {rc} rows')
         return rc
 
 
-def insert_dataframe(cn, df, table, key_cols=None, upd_only_none_cols=None, **kwargs):
+def insert_record(cn, obj, table, key_cols=None, upd_only_none_cols=None, **kwargs):
     """One step database insert of dataframe
 
     :param key_cols: columns to check for conflict
@@ -578,13 +620,13 @@ def insert_dataframe(cn, df, table, key_cols=None, upd_only_none_cols=None, **kw
 
     table_cols_sql=f'select skeys(hstore(null::{table})) as column'
     table_cols={c.lower() for c in select_column(cn, table_cols_sql)}
-    for col in df.cols[:]:
+    for col in obj.cols[:]:
         if col.lower() not in table_cols:
-            df.remove_column(col)
+            obj.remove_column(col)
             logger.debug(f'Removed {col}, not a column of {table}')
 
     if key_cols:
-        upd_cols=key_cols and [c for c in df.cols if c not in key_cols]
+        upd_cols=key_cols and [c for c in obj.cols if c not in key_cols]
     else:
         # look up table primary keys
         sql="""
@@ -600,7 +642,7 @@ where
         """
         key_cols=list(select(cn, sql, table).unwind('column'))
 
-    upd_cols=key_cols and [c for c in df.cols if c not in key_cols]
+    upd_cols=key_cols and [c for c in obj.cols if c not in key_cols]
     if upd_cols:
         coalesce=(
             lambda t, c: f'{c}=coalesce({t}.{c}, excluded.{c})'
@@ -611,16 +653,16 @@ where
         )
     else:
         conflict = 'on conflict do nothing'
-    values = ', '.join([f"({', '.join(['%s'] * len(df.cols))})"] * len(df))
+    values = ', '.join([f"({', '.join(['%s'] * len(obj.cols))})"] * len(obj))
     sql = f"""
     insert into {table} (
-    {', '.join(df.cols)}
+    {', '.join(obj.cols)}
     )
     values
     {values}
     {conflict}
     """
-    vals = list(flatten(list(df.unwind(*df.cols))))
+    vals = list(flatten(list(obj.unwind(*obj.cols))))
     try:
         with transaction(cn) as tx:
             rc = tx.execute(sql, *vals)
@@ -630,8 +672,8 @@ where
             reset_sequence(cn, table, id_name)
 
     logger.info(f'Inserted {rc} rows into {table}')
-    if rc != len(df):
-        logger.warning(f'{len(df) - rc} rows were skipped due to existing contraints')
+    if rc != len(obj):
+        logger.warning(f'{len(obj) - rc} rows were skipped due to existing contraints')
     return rc
 
 
