@@ -1,4 +1,5 @@
 import atexit
+import datetime
 import logging
 import re
 import sqlite3
@@ -9,13 +10,13 @@ from functools import wraps
 from numbers import Number
 from typing import Any
 
-import numpy as np
 import pandas as pd
 import psycopg
-import psycopg2
+import pyarrow as pa
 import pymssql
 from more_itertools import flatten
 from psycopg import ClientCursor
+from psycopg.postgres import types
 from psycopg.types.datetime import DateLoader, TimestampLoader
 from psycopg.types.datetime import TimestamptzLoader
 
@@ -44,13 +45,13 @@ __all__ = [
     'select_scalar_or_none',
     'update_or_insert',
     'update_row',
-    'create_record'
+    'create_dataframe'
     ]
 
 
-# == psycopg
+# == psycopg adapters
 
-# loaders that overwrite default behavior and return date objects
+
 class DateMixin:
     def load(self, data): return Date(super().load(data))
 
@@ -63,7 +64,6 @@ class DateTimeTzMixin:
     def load(self, data): return DateTime(super().load(data))
 
 
-# register custom loaders
 class CustomDateLoader(DateMixin, DateLoader): pass
 
 
@@ -77,71 +77,113 @@ psycopg.adapters.register_loader('date', CustomDateLoader)
 psycopg.adapters.register_loader('timestamp', CustomDateTimeLoader)
 psycopg.adapters.register_loader('timestamptz', CustomDateTimeTzLoader)
 
-# custom errors
+
+# == sqlite adapter
+
+
+def adapt_date_iso(val):
+    """Adapt datetime.date to ISO 8601 date."""
+    return val.isoformat()
+
+
+def adapt_datetime_iso(val):
+    """Adapt datetime.datetime to timezone-naive ISO 8601 date."""
+    return val.isoformat()
+
+
+sqlite3.register_adapter(datetime.date, adapt_date_iso)
+sqlite3.register_adapter(datetime.datetime, adapt_datetime_iso)
+sqlite3.register_adapter(Date, adapt_date_iso)
+sqlite3.register_adapter(DateTime, adapt_datetime_iso)
+
+
+def convert_date(val):
+    """Convert ISO 8601 date to datetime.date object."""
+    return Date.fromisoformat(val.decode())
+
+
+def convert_datetime(val):
+    """Convert ISO 8601 datetime to datetime.datetime object."""
+    return DateTime.fromisoformat(val.decode())
+
+
+sqlite3.register_converter('date', convert_date)
+sqlite3.register_converter('datetime', convert_datetime)
+
+
+# == psycopg type mapping
+
+
+oid = lambda x: types.get(x).oid
+aoid = lambda x: types.get(x).array_oid
+
+postgres_types = {}
+for v in [
+    oid('"char"'),
+    oid('bpchar'),
+    oid('character varying'),
+    oid('character'),
+    oid('json'),
+    oid('name'),
+    oid('text'),
+    oid('uuid'),
+    oid('varchar'),
+]:
+    postgres_types[v] = str
+for v in [
+    oid('bigint'),
+    oid('int2'),
+    oid('int4'),
+    oid('int8'),
+    oid('integer'),
+]:
+    postgres_types[v] = int
+for v in [
+    oid('float4'),
+    oid('float8'),
+    oid('double precision'),
+    oid('numeric'),
+]:
+    postgres_types[v] = float
+for v in [oid('date')]:
+    postgres_types[v] = Date
+for v in [
+    oid('time'),
+    oid('time with time zone'),
+    oid('time without time zone'),
+    oid('timestamp with time zone'),
+    oid('timestamp without time zone'),
+    oid('timestamptz'),
+    oid('timetz'),
+    oid('timestamp'),
+]:
+    postgres_types[v] = DateTime
+for v in [oid('bool'), oid('boolean')]:
+    postgres_types[v] = bool
+for v in [oid('bytea'), oid('jsonb')]:
+    postgres_types[v] = bytes
+postgres_types[aoid('int2vector')] = list
+for k in list(postgres_types):
+    postgres_types[aoid(k)] = list
+
+
+# == defined errors
+
+
 PgIntegrityError = psycopg.IntegrityError
 PgUniqueViolation = psycopg.errors.UniqueViolation
 PgProgrammingError = psycopg.ProgrammingError
 
-# == psycopg2
-
-# register custom loaders
-DATE = psycopg2.extensions.new_type(
-    psycopg2.extensions.DATE.values+psycopg2.extensions.PYDATE.values,
-    'DATE', lambda val, cur: Date(val))
-DATETIME = psycopg2.extensions.new_type(
-    psycopg2.DATETIME.values+psycopg2.extensions.PYDATETIME.values,
-    'DATETIME', lambda val, cur: DateTime(val))
-psycopg2.extensions.register_type(DATE)
-psycopg2.extensions.register_type(DATETIME)
-
-# custom typemap
-PGTYPEMAP = {}
-for v in psycopg2.STRING.values + psycopg2.extensions.UNICODE.values:
-    PGTYPEMAP[v] = str
-for v in psycopg2.extensions.INTEGER.values + psycopg2.extensions.LONGINTEGER.values:
-    PGTYPEMAP[v] = np.int64
-for v in psycopg2.extensions.FLOAT.values + psycopg2.extensions.DECIMAL.values:
-    PGTYPEMAP[v] = np.float64
-for v in psycopg2.extensions.DATE.values + psycopg2.extensions.PYDATE.values:
-    PGTYPEMAP[v] = Date
-for v in psycopg2.DATETIME.values + psycopg2.extensions.PYDATETIME.values:
-    PGTYPEMAP[v] = DateTime
-for v in psycopg2.BINARY.values + psycopg2.extensions.BOOLEAN.values:
-    PGTYPEMAP[v] = bool
-for v in (
-    psycopg2.extensions.BINARYARRAY.values
-    + psycopg2.extensions.BOOLEANARRAY.values
-    + psycopg2.extensions.INTEGERARRAY.values
-    + psycopg2.extensions.FLOATARRAY.values
-    + psycopg2.extensions.LONGINTEGERARRAY.values
-    + psycopg2.extensions.DATEARRAY.values
-    + psycopg2.extensions.DATETIMEARRAY.values
-    + psycopg2.extensions.DECIMALARRAY.values
-    + psycopg2.extensions.STRINGARRAY.values
-):
-    PGTYPEMAP[v] = list
-for v in (17,):   # BYTEA
-    PGTYPEMAP[v] = bytes
-
-# == pymssql
-
-# custom errors
 ProgrammingError = pymssql.DatabaseError
 IntegrityError = pymssql.IntegrityError
 GeneralError = pymssql.Error
 OperationalError = pymssql.OperationalError
 
-# == sqlite3
 
-# nothing yet
+# == main
 
 
 CONNECTIONOBJ = (psycopg.Connection, pymssql.Connection)
-
-
-class AbstractRecord:
-    """Result from select operation needs to be patched in `create_record`
-    """
 
 
 def isconnection(cn):
@@ -154,7 +196,7 @@ def isconnection(cn):
     False
     """
     try:
-        return isinstance(cn.connection.connection, CONNECTIONOBJ)
+        return isinstance(cn.connection, CONNECTIONOBJ)
     except:
         return False
 
@@ -219,7 +261,7 @@ class CursorWrapper:
         created this connection.
         """
         start = time.time()
-        if isinstance(self.connwrapper.connection.connection, pymssql.Connection | sqlite3.Connection):
+        if isinstance(self.connwrapper.connection, pymssql.Connection | sqlite3.Connection):
             logger.debug(f'SQL:\n{sql}\nargs: {str(args)}\nkwargs: {str(kwargs)}')
         self.cursor.execute(sql, *args, **kwargs)
         end = time.time()
@@ -302,9 +344,14 @@ class Options(ConfigOptions):
     cleanup: bool = True
 
     def __post_init__(self):
+        assert self.drivername in {'postgres', 'sqlserver', 'sqlite'}, \
+            'drivername must be `postgres`, `sqlserver`, or `sqlite`'
         self.appname = self.appname or scriptname() or 'python_console'
-        for field in fields(self):
-            assert getattr(self, field.name), f'field {field.name} cannot be None or 0'
+        if self.drivername in {'postgres', 'sqlserver'}:
+            for field in fields(self):
+                assert getattr(self, field.name), f'field {field.name} cannot be None or 0'
+        if self.drivername == 'sqlite':
+            assert self.database, 'field database cannot be None'
 
 
 class LoggingCursor(ClientCursor):
@@ -342,13 +389,8 @@ def connect(options: str | dict | Options | None, config=None, **kw):
             kw.pop(field.name, None)
     conn = None
     if options.drivername == 'sqlite':
-        conn = sqlite3.connect(
-            database=options.database,
-            host=options.hostname,
-            application_name=options.appname,
-            user=options.username,
-            password=options.password,
-        )
+        conn = sqlite3.connect(database=options.database)
+        conn.row_factory = sqlite3.Row
     if options.drivername == 'postgres':
         conn = psycopg.connect(
             dbname=options.database,
@@ -391,15 +433,15 @@ def IterChunk(cursor, size=5000):
 
 @dumpsql
 @placeholder
-def select(cn, sql, *args, **kwargs) -> AbstractRecord:
+def select(cn, sql, *args, **kwargs) -> pd.DataFrame:
     cursor = _dict_cur(cn)
     cursor.execute(sql, args)
-    return create_record(cursor, **kwargs)
+    return create_dataframe(cursor, **kwargs)
 
 
 @dumpsql
 @placeholder
-def callproc(cn, sql, *args, **kwargs) -> AbstractRecord:
+def callproc(cn, sql, *args, **kwargs) -> pd.DataFrame:
     """Just like select above but used for stored procs which
     often return multiple resultsets because of nocount being
     off (each rowcount is a separate resultset). We walk through
@@ -408,14 +450,14 @@ def callproc(cn, sql, *args, **kwargs) -> AbstractRecord:
     """
     cursor=_dict_cur(cn)
     cursor.execute(sql, args)
-    return create_record(cursor, **kwargs)
+    return create_dataframe(cursor, **kwargs)
 
 
 class DictRowFactory:
     """Rough equivalent of psycopg2.extras.RealDictCursor
     """
     def __init__(self, cursor: psycopg.ClientCursor[Any]):
-        self.fields = [(c.name, PGTYPEMAP.get(c.type_code)) for c in (cursor.description or [])]
+        self.fields = [(c.name, postgres_types.get(c.type_code)) for c in (cursor.description or [])]
 
     def __call__(self, values: Sequence[Any]) -> dict[str, Any]:
         return {name: cast(value)
@@ -425,7 +467,7 @@ class DictRowFactory:
 
 
 def _dict_cur(cn):
-    typ = type(cn.connection.connection)
+    typ = type(cn.connection)
     if typ == psycopg.Connection:
         return cn.cursor(row_factory=DictRowFactory)
     if typ == pymssql.Connection:
@@ -435,10 +477,17 @@ def _dict_cur(cn):
     raise ValueError('Unknown connection type')
 
 
-def create_record(cursor) -> AbstractRecord:
+def create_dataframe(cursor) -> pd.DataFrame:
     """Patchable function (see `__init__.py`) that wraps raw
     cursor with object
     """
+    if isinstance(cursor.connwrapper.connection, psycopg.Connection):
+        cols = [c.name for c in cursor.description]
+    if isinstance(cursor.connwrapper.connection, pymssql.Connection | sqlite3.Connection):
+        cols = [c[0] for c in cursor.description]
+    data = cursor.fetchall()  # iterdict (dictcursor)
+    dataT = [[row[col] for row in data] for col in cols]  # list of cols
+    return pa.table(dataT, names=cols).to_pandas(types_mapper=pd.ArrowDtype)
 
 
 def select_column(cn, sql, *args):
@@ -451,11 +500,8 @@ def select_column(cn, sql, *args):
     >>> assert len(df) > 10
     """
     obj = select(cn, sql, *args)
-    if isinstance(obj, pd.DataFrame):
-        assert len(obj.columns) == 1, 'Expected one col, got %d' % len(obj.columns)
-        return obj[obj.columns[0]]
-    # assume iterdict
-    return [r[list(r.keys())[0]] for r in obj]
+    assert len(obj.columns) == 1, 'Expected one col, got %d' % len(obj.columns)
+    return obj[obj.columns[0]]
 
 
 def select_column_unique(cn, sql, *args):
@@ -465,38 +511,26 @@ def select_column_unique(cn, sql, *args):
 def select_row(cn, sql, *args):
     obj = select(cn, sql, *args)
     assert len(obj) == 1, 'Expected one row, got %d' % len(obj)
-    if isinstance(obj, pd.DataFrame):
-        return obj.iloc[0]
-    # assume iterdict
-    return obj[0]
+    return obj.iloc[0]
 
 
 def select_row_or_none(cn, sql, *args):
     obj = select(cn, sql, *args)
     if len(obj) == 1:
-        if isinstance(obj, pd.DataFrame):
-            return obj.iloc[0]
-        # assume iterdict
-        return obj[0]
+        return obj.iloc[0]
     return None
 
 
 def select_scalar(cn, sql, *args):
     obj = select(cn, sql, *args)
     assert len(obj) == 1, 'Expected one col, got %d' % len(obj)
-    if isinstance(obj, pd.DataFrame):
-        return obj[obj.columns[0]].iloc[0]
-    # assume dict
-    return obj[list(obj.keys())[0]]
+    return obj[obj.columns[0]].iloc[0]
 
 
 def select_scalar_or_none(cn, sql, *args):
     obj = select_row_or_none(cn, sql, *args)
     if len(obj):
-        if isinstance(obj, pd.Series):
-            return obj.iloc[0]
-        # assume dict
-        return obj[list(obj.keys())[0]]
+        return obj.iloc[0]
     return None
 
 
@@ -564,10 +598,10 @@ class transaction:
 
     @dumpsql
     @placeholder
-    def select(self, sql, *args, **kwargs) -> AbstractRecord:
+    def select(self, sql, *args, **kwargs) -> pd.DataFrame:
         cursor = self.cursor
         cursor.execute(sql, args)
-        return create_record(cursor, **kwargs)
+        return create_dataframe(cursor, **kwargs)
 
     @dumpsql
     @placeholder
@@ -602,7 +636,7 @@ def update_or_insert(cn, update_sql, insert_sql, *args):
         return rc
 
 
-def insert_record(cn, obj, table, key_cols=None, upd_only_none_cols=None, **kwargs):
+def insert_records(cn, obj, table, key_cols=None, upd_only_none_cols=None, **kwargs):
     """One step database insert of dataframe
 
     :param key_cols: columns to check for conflict
@@ -682,8 +716,14 @@ where
 #
 
 def insert_rows(cn, table, rows: list[dict]):
-    sql = ';\n'.join([insert_row_sql(table, list(row.keys())) for row in rows])+';'
+    cols = list(rows[0].keys())
     vals = list(flatten([list(d.values()) for d in rows]))
+
+    def genvals(cols, vals):
+        this = ','.join(['%s']*len(cols))
+        return ','.join([f'({this})']*int(len(vals)/len(cols)))
+
+    sql = f'insert into {table} ({",".join(cols)}) values {genvals(cols, vals)}'
     return insert(cn, sql, *vals)
 
 

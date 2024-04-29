@@ -10,9 +10,8 @@ packages = [{ include = "db", from = "src" }]
 python = "~3.11"
 
 pandas = "*"
-numpy = "*"
-psycopg = {extras = ["binary"], version = "*"}
-psycopg2-binary = "*"
+pyarrow = "*"
+psycopg = { extras = ["binary"], version = "*" }
 pymssql = "*"
 
 libb-util = { git = "https://github.com/bissli/libb-util" }
