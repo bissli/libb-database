@@ -163,9 +163,9 @@ for v in [oid('bool'), oid('boolean')]:
     postgres_types[v] = bool
 for v in [oid('bytea'), oid('jsonb')]:
     postgres_types[v] = bytes
-postgres_types[aoid('int2vector')] = list
-for k in list(postgres_types):
-    postgres_types[aoid(k)] = list
+postgres_types[aoid('int2vector')] = tuple
+for k in tuple(postgres_types):
+    postgres_types[aoid(k)] = tuple
 
 
 # == defined errors
@@ -299,7 +299,7 @@ def placeholder(func):
 
 def _page_mssql(sql, order_by, offset, limit):
     """Wrap a MSSQL stmt in sql server windowing notation, strip existing order by"""
-    if isinstance(order_by, list | tuple):
+    if isinstance(order_by, tuple | tuple):
         order_by = ','.join(order_by)
     match = re.search('order by', sql, re.IGNORECASE)
     if match:
@@ -314,7 +314,7 @@ FETCH NEXT {limit} ROWS ONLY"""
 
 def _page_pgsql(sql, order_by, offset, limit):
     """Wrap a Postgres SQL stmt in sql server windowing notation, strip existing order by"""
-    if isinstance(order_by, list | tuple):
+    if isinstance(order_by, tuple | tuple):
         order_by = ','.join(order_by)
     match = re.search('order by', sql, re.IGNORECASE)
     if match:
@@ -592,7 +592,7 @@ class transaction:
             finally:
                 if not result:
                     return
-            if isinstance(returnid, list | tuple):
+            if isinstance(returnid, tuple | tuple):
                 return [result[r] for r in returnid]
             else:
                 return result[returnid]
@@ -631,47 +631,16 @@ def update_or_insert(cn, update_sql, insert_sql, *args):
         return rc
 
 
-def upsert_rows(
-    cn,
-    table: str,
-    rows: list[dict],
-    key_cols: list = None,
-    upd_only_none_cols: list = None,
-    **kw
-):
-    """One step database insert of iterdict
-
-    :param key_cols: columns to check for conflict
-    :param upd_only_none_cols: columns that will update only if null value
-    :param reset_sequence: if the table has a sequence generator (autoincrementing id), a failed
-                     transaction insert will nonetheless trigger the sequence and increment.
-                     This param allows us to reset the sequence after the transaction.
-    :param id_name: name of the primary table id (default: 'id') for reset_sequence
+def get_table_columns(cn, table):
+    sql = f"""
+select skeys(hstore(null::{table})) as column
     """
-    assert isinstance(cn.connection, psycopg.Connection), '`upsert_rows` only supports postgres'
-    if upd_only_none_cols is None:
-        upd_only_none_cols=[]
-    if key_cols is None:
-        key_cols=[]
-    reset=kw.pop('reset_sequence', False)
+    cols = select_column(cn, sql)
+    return cols
 
-    cols = list(rows[0])  # assume consistency
 
-    table_cols_sql=f'select skeys(hstore(null::{table})) as column'
-    table_cols={c.lower() for c in select_column(cn, table_cols_sql)}
-    table
-    for col in cols.copy():
-        if col.lower() not in table_cols:
-            cols.remove(col)
-            for row in rows:
-                row.pop(col, None)
-            logger.debug(f'Removed {col}, not a column of {table}')
-
-    if key_cols:
-        upd_cols=key_cols and [c for c in cols if c not in key_cols]
-    else:
-        # look up table primary keys
-        sql="""
+def get_table_primary_keys(cn, table):
+    sql = """
 select
     a.attname as column,
     format_type(a.atttypid, a.atttypmod) as type
@@ -681,18 +650,50 @@ join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
 where
     i.indrelid = %s::regclass
     and i.indisprimary
-        """
-        key_cols=[row['column'] for row in select(cn, sql, table).to_dict('records')]
+    """
+    cols = [row['column'] for row in select(cn, sql, table).to_dict('records')]
+    return cols
 
-    upd_cols=key_cols and [c for c in cols if c not in key_cols]
+
+def upsert_rows(
+    cn,
+    table: str,
+    rows: tuple[dict],
+    lookup_primary_keys: bool = False,
+    lookup_table_cols: bool = False,
+    conflict_key_cols: tuple = (),
+    conflict_update_coalesce_cols: tuple = (),
+    **kw
+):
+    """One step database insert of iterdict
+    """
+    assert isinstance(cn.connection, psycopg.Connection), '`upsert_rows` only supports postgres'
+    reset=kw.pop('reset_sequence', False)
+
+    cols = tuple(rows[0])  # assume consistency
+
+    if lookup_table_cols:
+        table_cols = get_table_columns(cn, table)
+        for col in cols.copy():
+            if col.lower() not in table_cols:
+                cols.remove(col)
+                for row in rows:
+                    row.pop(col, None)
+                logger.debug(f'Removed {col}, not a column of {table}')
+
+    if lookup_primary_keys and not conflict_key_cols:
+        conflict_key_cols = get_table_primary_keys(cn, table)
+    if conflict_key_cols:
+        upd_cols=conflict_key_cols and [c for c in cols if c not in conflict_key_cols]
+
+    upd_cols=conflict_key_cols and [c for c in cols if c not in conflict_key_cols]
     if upd_cols:
         coalesce= lambda t, c: f'{c}=coalesce({t}.{c}, excluded.{c})' \
-            if c in upd_only_none_cols \
+            if c in conflict_update_coalesce_cols \
             else f'{c}=excluded.{c}'
-        _key_cols = '\n'.join(key_cols)
         conflict = f"""
 on conflict (
-    {_key_cols}
+    {','.join(conflict_key_cols)}
 ) do update set
     {', '.join([coalesce(table, c) for c in upd_cols])}
 """.strip()
@@ -707,7 +708,7 @@ values
 {values}
 {conflict}
     """.strip()
-    vals = list(flatten([list(row.values()) for row in rows]))
+    vals = tuple(flatten([tuple(row.values()) for row in rows]))
     try:
         with transaction(cn) as tx:
             rc = tx.execute(table_cols_sql, *vals)
@@ -726,9 +727,9 @@ values
 # SQL helpers
 #
 
-def insert_rows(cn, table, rows: list[dict]):
-    cols = list(rows[0].keys())
-    vals = list(flatten([list(row.values()) for row in rows]))
+def insert_rows(cn, table, rows: tuple[dict]):
+    cols = tuple(rows[0].keys())
+    vals = tuple(flatten([tuple(row.values()) for row in rows]))
 
     def genvals(cols, vals):
         this = ','.join(['%s']*len(cols))
@@ -759,7 +760,7 @@ def update_row(cn, table, keyfields, keyvalues, datafields, datavalues):
     """
     assert len(keyfields) == len(keyvalues), 'keyfields must be same length as keyvalues'
     assert len(datafields) == len(datavalues), 'datafields must be same length as datavalues'
-    values = list(datavalues) + list(keyvalues)
+    values = tuple(datavalues) + tuple(keyvalues)
     return update(cn, update_row_sql(table, keyfields, datafields), *values)
 
 
