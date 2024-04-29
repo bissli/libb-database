@@ -36,6 +36,7 @@ __all__ = [
     'update',
     'insert_row',
     'insert_rows',
+    'upsert_rows',
     'select',
     'select_column',
     'select_column_unique',
@@ -562,18 +563,18 @@ class transaction:
     """
 
     def __init__(self, cn):
-        self.cn = cn
+        self.connection = cn
 
     def __enter__(self):
-        self.cursor = _dict_cur(self.cn)
+        self.cursor = _dict_cur(self.connection)
         return self
 
     def __exit__(self, exc_type, value, traceback):
         if exc_type is not None:
-            self.cn.rollback()
+            self.connection.rollback()
             logger.warning('Rolling back the current transaction')
         else:
-            self.cn.commit()
+            self.connection.commit()
             logger.debug('Committed transaction.')
 
     @dumpsql
@@ -603,12 +604,6 @@ class transaction:
         cursor.execute(sql, args)
         return create_dataframe(cursor, **kwargs)
 
-    @dumpsql
-    @placeholder
-    def select_scalar(self, cn, sql, *args):
-        col = select_column(cn, sql, *args)
-        return col[list(col.keys())[0]]
-
 
 @dumpsql
 @placeholder
@@ -636,8 +631,15 @@ def update_or_insert(cn, update_sql, insert_sql, *args):
         return rc
 
 
-def insert_records(cn, obj, table, key_cols=None, upd_only_none_cols=None, **kwargs):
-    """One step database insert of dataframe
+def upsert_rows(
+    cn,
+    table: str,
+    rows: list[dict],
+    key_cols: list = None,
+    upd_only_none_cols: list = None,
+    **kw
+):
+    """One step database insert of iterdict
 
     :param key_cols: columns to check for conflict
     :param upd_only_none_cols: columns that will update only if null value
@@ -646,21 +648,27 @@ def insert_records(cn, obj, table, key_cols=None, upd_only_none_cols=None, **kwa
                      This param allows us to reset the sequence after the transaction.
     :param id_name: name of the primary table id (default: 'id') for reset_sequence
     """
+    assert isinstance(cn.connection, psycopg.Connection), '`upsert_rows` only supports postgres'
     if upd_only_none_cols is None:
         upd_only_none_cols=[]
     if key_cols is None:
         key_cols=[]
-    reset=kwargs.pop('reset_sequence', False)
+    reset=kw.pop('reset_sequence', False)
+
+    cols = list(rows[0])  # assume consistency
 
     table_cols_sql=f'select skeys(hstore(null::{table})) as column'
     table_cols={c.lower() for c in select_column(cn, table_cols_sql)}
-    for col in obj.cols[:]:
+    table
+    for col in cols.copy():
         if col.lower() not in table_cols:
-            obj.remove_column(col)
+            cols.remove(col)
+            for row in rows:
+                row.pop(col, None)
             logger.debug(f'Removed {col}, not a column of {table}')
 
     if key_cols:
-        upd_cols=key_cols and [c for c in obj.cols if c not in key_cols]
+        upd_cols=key_cols and [c for c in cols if c not in key_cols]
     else:
         # look up table primary keys
         sql="""
@@ -674,40 +682,43 @@ where
     i.indrelid = %s::regclass
     and i.indisprimary
         """
-        key_cols=list(select(cn, sql, table).unwind('column'))
+        key_cols=[row['column'] for row in select(cn, sql, table).to_dict('records')]
 
-    upd_cols=key_cols and [c for c in obj.cols if c not in key_cols]
+    upd_cols=key_cols and [c for c in cols if c not in key_cols]
     if upd_cols:
-        coalesce=(
-            lambda t, c: f'{c}=coalesce({t}.{c}, excluded.{c})'
-            if c in upd_only_none_cols else f'{c}=excluded.{c}'
-        )
-        conflict = 'on conflict ({}) do update set \n{}'.format(
-            '\n,'.join(key_cols), ', '.join([coalesce(table, c) for c in upd_cols])
-        )
+        coalesce= lambda t, c: f'{c}=coalesce({t}.{c}, excluded.{c})' \
+            if c in upd_only_none_cols \
+            else f'{c}=excluded.{c}'
+        _key_cols = '\n'.join(key_cols)
+        conflict = f"""
+on conflict (
+    {_key_cols}
+) do update set
+    {', '.join([coalesce(table, c) for c in upd_cols])}
+""".strip()
     else:
         conflict = 'on conflict do nothing'
-    values = ', '.join([f"({', '.join(['%s'] * len(obj.cols))})"] * len(obj))
-    sql = f"""
-    insert into {table} (
-    {', '.join(obj.cols)}
-    )
-    values
-    {values}
-    {conflict}
-    """
-    vals = list(flatten(list(obj.unwind(*obj.cols))))
+    values = ', '.join([f"({', '.join(['%s'] * len(cols))})"] * len(rows))
+    table_cols_sql = f"""
+insert into {table} (
+    {', '.join(cols)}
+)
+values
+{values}
+{conflict}
+    """.strip()
+    vals = list(flatten([list(row.values()) for row in rows]))
     try:
         with transaction(cn) as tx:
-            rc = tx.execute(sql, *vals)
+            rc = tx.execute(table_cols_sql, *vals)
     finally:
         if reset:
-            id_name = kwargs.pop('id_name', 'id')
+            id_name = kw.pop('id_name', 'id')
             reset_sequence(cn, table, id_name)
 
     logger.info(f'Inserted {rc} rows into {table}')
-    if rc != len(obj):
-        logger.warning(f'{len(obj) - rc} rows were skipped due to existing contraints')
+    if rc != len(rows):
+        logger.warning(f'{len(rows) - rc} rows were skipped due to existing contraints')
     return rc
 
 
@@ -717,7 +728,7 @@ where
 
 def insert_rows(cn, table, rows: list[dict]):
     cols = list(rows[0].keys())
-    vals = list(flatten([list(d.values()) for d in rows]))
+    vals = list(flatten([list(row.values()) for row in rows]))
 
     def genvals(cols, vals):
         this = ','.join(['%s']*len(cols))

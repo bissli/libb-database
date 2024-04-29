@@ -11,6 +11,7 @@ __all__ = [
     'update',
     'insert_row',
     'insert_rows',
+    'upsert_rows',
     'select',
     'select_column',
     'select_column_unique',
