@@ -1,7 +1,9 @@
 from db.db import *
+from db.helpers import is_null
+from db.options import DatabaseOptions
 
 __all__ = [
-    'Options',
+    # db
     'transaction',
     'callproc',
     'connect',
@@ -22,4 +24,8 @@ __all__ = [
     'update_or_insert',
     'update_row',
     'create_record',
+    # helpers
+    'is_null',
+    # options
+    'DatabaseOptions',
     ]

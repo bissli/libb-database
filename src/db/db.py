@@ -1,11 +1,10 @@
 import atexit
-import datetime
 import logging
 import re
 import sqlite3
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, fields
+from dataclasses import fields
 from functools import wraps
 from numbers import Number
 from typing import Any
@@ -17,16 +16,15 @@ import pymssql
 from more_itertools import flatten
 from psycopg import ClientCursor
 from psycopg.postgres import types
-from psycopg.types.datetime import DateLoader, TimestampLoader
-from psycopg.types.datetime import TimestamptzLoader
 
 from date import Date, DateTime
-from libb import ConfigOptions, load_options, scriptname
+from db.adapters import register_adapters
+from db.options import DatabaseOptions
+from libb import load_options
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    'Options',
     'transaction',
     'callproc',
     'connect',
@@ -49,68 +47,7 @@ __all__ = [
     'create_dataframe'
     ]
 
-
-# == psycopg adapters
-
-
-class DateMixin:
-    def load(self, data): return Date(super().load(data))
-
-
-class DateTimeMixin:
-    def load(self, data): return DateTime(super().load(data))
-
-
-class DateTimeTzMixin:
-    def load(self, data): return DateTime(super().load(data))
-
-
-class CustomDateLoader(DateMixin, DateLoader): pass
-
-
-class CustomDateTimeLoader(DateTimeMixin, TimestampLoader): pass
-
-
-class CustomDateTimeTzLoader(DateTimeTzMixin, TimestamptzLoader): pass
-
-
-psycopg.adapters.register_loader('date', CustomDateLoader)
-psycopg.adapters.register_loader('timestamp', CustomDateTimeLoader)
-psycopg.adapters.register_loader('timestamptz', CustomDateTimeTzLoader)
-
-
-# == sqlite adapter
-
-
-def adapt_date_iso(val):
-    """Adapt datetime.date to ISO 8601 date."""
-    return val.isoformat()
-
-
-def adapt_datetime_iso(val):
-    """Adapt datetime.datetime to timezone-naive ISO 8601 date."""
-    return val.isoformat()
-
-
-sqlite3.register_adapter(datetime.date, adapt_date_iso)
-sqlite3.register_adapter(datetime.datetime, adapt_datetime_iso)
-sqlite3.register_adapter(Date, adapt_date_iso)
-sqlite3.register_adapter(DateTime, adapt_datetime_iso)
-
-
-def convert_date(val):
-    """Convert ISO 8601 date to datetime.date object."""
-    return Date.fromisoformat(val.decode())
-
-
-def convert_datetime(val):
-    """Convert ISO 8601 datetime to datetime.datetime object."""
-    return DateTime.fromisoformat(val.decode())
-
-
-sqlite3.register_converter('date', convert_date)
-sqlite3.register_converter('datetime', convert_datetime)
-
+register_adapters()
 
 # == psycopg type mapping
 
@@ -189,12 +126,6 @@ CONNECTIONOBJ = (psycopg.Connection, pymssql.Connection)
 
 def isconnection(cn):
     """Utility to test for the presence of a mock connection
-
-    >>> cn = __POSTGRES_CONNECTION()
-    >>> isconnection(cn)
-    True
-    >>> isconnection('mock')
-    False
     """
     try:
         return isinstance(cn.connection, CONNECTIONOBJ)
@@ -326,35 +257,6 @@ ORDER BY {order_by}
 LIMIT {limit} OFFSET {offset}"""
 
 
-@dataclass
-class Options(ConfigOptions):
-    """Options
-
-    supported driver names: `postgres`, `sqlserver`, `sqlite`
-
-    """
-
-    drivername: str = 'postgres'
-    hostname: str = None
-    username: str = None
-    password: str = None
-    database: str = None
-    port: int = 0
-    timeout: int = 0
-    appname: str = None
-    cleanup: bool = True
-
-    def __post_init__(self):
-        assert self.drivername in {'postgres', 'sqlserver', 'sqlite'}, \
-            'drivername must be `postgres`, `sqlserver`, or `sqlite`'
-        self.appname = self.appname or scriptname() or 'python_console'
-        if self.drivername in {'postgres', 'sqlserver'}:
-            for field in fields(self):
-                assert getattr(self, field.name), f'field {field.name} cannot be None or 0'
-        if self.drivername == 'sqlite':
-            assert self.database, 'field database cannot be None'
-
-
 class LoggingCursor(ClientCursor):
     """See https://github.com/psycopg/psycopg/discussions/153 if
     considering replacing raw connections with SQLAlchemy
@@ -366,8 +268,8 @@ class LoggingCursor(ClientCursor):
         return result
 
 
-@load_options(cls=Options)
-def connect(options: str | dict | Options | None, config=None, **kw):
+@load_options(cls=DatabaseOptions)
+def connect(options: str | dict | DatabaseOptions | None, config=None, **kw):
     """Database connection wrapper
 
     Use config.py to specify database
@@ -377,15 +279,10 @@ def connect(options: str | dict | Options | None, config=None, **kw):
 
     cn = connect('sql.<appname>.<environment>', config=config)
     OR (legacy)
-    cn = connect(dbengine='foo', hostname='bar', ...)
+    cn = connect(database='foo', hostname='bar', ...)
     ...
-
-    >>> cn = __POSTGRES_CONNECTION()
-    >>> df = select(cn, __POSTGRES_TEST_QUERY())
-    >>> assert len(df.columns) == 2
-    >>> assert len(df) > 10
     """
-    if isinstance(options, Options):
+    if isinstance(options, DatabaseOptions):
         for field in fields(options):
             kw.pop(field.name, None)
     conn = None
@@ -494,15 +391,10 @@ def create_dataframe(cursor) -> pd.DataFrame:
 def select_column(cn, sql, *args):
     """When we query a single select parameter, return just
     that dataframe column.
-
-    >>> cn = __POSTGRES_CONNECTION()
-    >>> df = select_column(cn, __POSTGRES_TEST_QUERY(1))
-    >>> assert isinstance(df, pd.Series)
-    >>> assert len(df) > 10
     """
-    obj = select(cn, sql, *args)
-    assert len(obj.columns) == 1, 'Expected one col, got %d' % len(obj.columns)
-    return obj[obj.columns[0]]
+    df = select(cn, sql, *args)
+    assert len(df.columns) == 1, 'Expected one col, got %d' % len(df.columns)
+    return df[df.columns[0]]
 
 
 def select_column_unique(cn, sql, *args):
@@ -510,28 +402,28 @@ def select_column_unique(cn, sql, *args):
 
 
 def select_row(cn, sql, *args):
-    obj = select(cn, sql, *args)
-    assert len(obj) == 1, 'Expected one row, got %d' % len(obj)
-    return obj.iloc[0]
+    df = select(cn, sql, *args)
+    assert len(df) == 1, 'Expected one row, got %d' % len(df)
+    return df.iloc[0]
 
 
 def select_row_or_none(cn, sql, *args):
-    obj = select(cn, sql, *args)
-    if len(obj) == 1:
-        return obj.iloc[0]
+    df = select(cn, sql, *args)
+    if len(df) == 1:
+        return df.iloc[0]
     return None
 
 
 def select_scalar(cn, sql, *args):
-    obj = select(cn, sql, *args)
-    assert len(obj) == 1, 'Expected one col, got %d' % len(obj)
-    return obj[obj.columns[0]].iloc[0]
+    df = select(cn, sql, *args)
+    assert len(df) == 1, 'Expected one col, got %d' % len(df)
+    return df[df.columns[0]].iloc[0]
 
 
 def select_scalar_or_none(cn, sql, *args):
-    obj = select_row_or_none(cn, sql, *args)
-    if len(obj):
-        return obj.iloc[0]
+    df = select_row_or_none(cn, sql, *args)
+    if len(df):
+        return df.iloc[0]
     return None
 
 
@@ -554,12 +446,6 @@ class transaction:
     with db.transaction(cn) as tx:
         tx.execute('delete from ...', args)
         tx.execute('update from ...', args)
-
-    >>> cn = __POSTGRES_CONNECTION()
-    >>> with transaction(cn) as tx:
-    ...     df = tx.select(__POSTGRES_TEST_QUERY())
-    >>> assert len(df.columns) == 2
-    >>> assert len(df) > 10
     """
 
     def __init__(self, cn):
@@ -787,51 +673,3 @@ from
     else:
         execute(cn, sql)
     logger.debug(f'Reset sequence for {table=}')
-
-
-if __name__ == '__main__':
-    import os
-    import site
-
-    from libb import expandabspath
-
-    HERE = os.path.dirname(os.path.abspath(__file__))
-    TEST = expandabspath(os.path.join(HERE, '../../tests/fixtures'))
-    site.addsitedir(TEST)
-    from server import psql_docker_container
-
-    def __POSTGRES_TEST_QUERY(numcols=2):
-        sql="""
-select
-    {} {}
-from
-    pg_index i
-join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
-where
-    i.indisprimary
-        """
-        if numcols==1:
-            return sql.format('a.attname as column', '')
-        if numcols==2:
-            return sql.format('a.attname as column,', 'format_type(a.atttypid, a.atttypmod) as type')
-
-    def __POSTGRES_CONNECTION():
-        param = {
-            'drivername': 'postgres',
-            'username': 'postgres',
-            'password': 'password',
-            'database': 'test_db',
-            'hostname': 'localhost',
-            'port': 5432,
-            'timeout': 30,
-            }
-        return connect(**param)
-
-    container = psql_docker_container()
-    try:
-        cn = __POSTGRES_CONNECTION()
-        print(select(cn, 'select now()'))
-        import doctest
-        doctest.testmod(optionflags=4 | 8 | 32)
-    finally:
-        container.stop()

@@ -11,6 +11,7 @@ import db
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.append('..')
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -77,17 +78,7 @@ where
 
 @pytest.fixture(scope='session')
 def conn():
-    options = db.Options(
-        drivername='postgres',
-        username='postgres',
-        password='postgres',
-        hostname='localhost',
-        database='test_db',
-        timeout=30,
-        port=5432,
-        cleanup=True
-    )
-    cn = db.connect(options)
+    cn = db.connect('postgres', config)
     terminate_postgres_connections(cn)
     stage_test_data(cn)
     try:
