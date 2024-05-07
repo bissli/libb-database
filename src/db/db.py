@@ -140,11 +140,12 @@ class ConnectionWrapper:
     Can be used as a context manager ... with connect(...) as cn: pass
     """
 
-    def __init__(self, connection, cleanup=True):
+    def __init__(self, connection, options):
         self.connection = connection
+        self.options = options
         self.calls = 0
         self.time = 0
-        if cleanup:
+        if self.options.cleanup:
             atexit.register(self.cleanup)
 
     def __enter__(self):
@@ -311,7 +312,7 @@ def connect(options: str | dict | DatabaseOptions | None, config=None, **kw):
         )
     if not conn:
         raise AttributeError(f'{options.drivername} is not supported, see Options docstring')
-    return ConnectionWrapper(conn, options.cleanup)
+    return ConnectionWrapper(conn, options)
 
 
 def IterChunk(cursor, size=5000):
@@ -384,8 +385,11 @@ def create_dataframe(cursor) -> pd.DataFrame:
     if isinstance(cursor.connwrapper.connection, pymssql.Connection | sqlite3.Connection):
         cols = [c[0] for c in cursor.description]
     data = cursor.fetchall()  # iterdict (dictcursor)
-    dataT = [[row[col] for row in data] for col in cols]  # list of cols
-    return pa.table(dataT, names=cols).to_pandas(types_mapper=pd.ArrowDtype)
+    if cursor.connwrapper.options.pandas_backend == 'numpy':
+        return pd.DataFrame.from_records(list(data), columns=cols)
+    if cursor.connwrapper.options.pandas_backend == 'pyarrow':
+        dataT = [[row[col] for row in data] for col in cols]  # list of cols
+        return pa.table(dataT, names=cols).to_pandas(types_mapper=pd.ArrowDtype)
 
 
 def select_column(cn, sql, *args):

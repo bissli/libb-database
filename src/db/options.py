@@ -22,10 +22,13 @@ class DatabaseOptions(ConfigOptions):
     timeout: int = 0
     appname: str = None
     cleanup: bool = True
+    pandas_backend: str = 'numpy'
 
     def __post_init__(self):
         assert self.drivername in {'postgres', 'sqlserver', 'sqlite'}, \
             'drivername must be `postgres`, `sqlserver`, or `sqlite`'
+        assert self.pandas_backend in {'numpy', 'pyarrow'}, \
+            'pandas backend must be `numpy` or `pyarrow`'
         self.appname = self.appname or scriptname() or 'python_console'
         if self.drivername in {'postgres', 'sqlserver'}:
             for field in fields(self):
