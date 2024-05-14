@@ -61,5 +61,14 @@ def test_transaction(psql_docker, conn):
     assert result.to_dict('list') == expected_data, 'The transaction operations did not produce the expected results.'
 
 
+def test_connect_respawn(psql_docker, conn):
+    query = 'select count(1) from test_table'
+    db.select_scalar(conn, query)
+    conn.close()  # will respawn on close
+    result = db.select_scalar(conn, query)
+    expected_data = 7
+    assert result == expected_data
+
+
 if __name__ == '__main__':
     __import__('pytest').main([__file__])

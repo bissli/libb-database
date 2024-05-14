@@ -111,12 +111,36 @@ for k in tuple(postgres_types):
 PgIntegrityError = psycopg.IntegrityError
 PgUniqueViolation = psycopg.errors.UniqueViolation
 PgProgrammingError = psycopg.ProgrammingError
+PgOperationalError = psycopg.OperationalError
 
 ProgrammingError = pymssql.DatabaseError
 IntegrityError = pymssql.IntegrityError
 GeneralError = pymssql.Error
 OperationalError = pymssql.OperationalError
 
+# generally raised when connection is closed
+OperationalError = (PgOperationalError, OperationalError)
+
+
+def check_connection(func, x_times=1):
+    """Reconnect on closed connection
+    """
+    @wraps(func)
+    def inner(*args, **kwargs):
+        tries = 0
+        while tries <= x_times:
+            try:
+                return func(*args, **kwargs)
+            except OperationalError as err:
+                if tries > x_times:
+                    raise err
+                tries += 1
+                logger.warning(err)
+                conn = args[0]
+                if conn.options.check_connection:
+                    conn.connection.close()
+                    conn.connection = connect(conn.options).connection
+    return inner
 
 # == main
 
@@ -331,6 +355,7 @@ def IterChunk(cursor, size=5000):
 
 
 @dumpsql
+@check_connection
 @placeholder
 def select(cn, sql, *args, **kwargs) -> pd.DataFrame:
     cursor = _dict_cur(cn)
@@ -381,9 +406,9 @@ def create_dataframe(cursor) -> pd.DataFrame:
     cursor with object
     """
     if isinstance(cursor.connwrapper.connection, psycopg.Connection):
-        cols = [c.name for c in cursor.description]
+        cols = [c.name for c in (cursor.description or [])]
     if isinstance(cursor.connwrapper.connection, pymssql.Connection | sqlite3.Connection):
-        cols = [c[0] for c in cursor.description]
+        cols = [c[0] for c in (cursor.description or [])]
     data = cursor.fetchall()  # iterdict (dictcursor)
     if cursor.connwrapper.options.pandas_backend == 'numpy':
         return pd.DataFrame.from_records(list(data), columns=cols)
@@ -432,6 +457,7 @@ def select_scalar_or_none(cn, sql, *args):
 
 
 @dumpsql
+@check_connection
 @placeholder
 def execute(cn, sql, *args):
     cursor = cn.cursor()
@@ -455,8 +481,12 @@ class transaction:
     def __init__(self, cn):
         self.connection = cn
 
+    @property
+    def cursor(self):
+        """Lazy cursor"""
+        return _dict_cur(self.connection)
+
     def __enter__(self):
-        self.cursor = _dict_cur(self.connection)
         return self
 
     def __exit__(self, exc_type, value, traceback):
@@ -468,6 +498,7 @@ class transaction:
             logger.debug('Committed transaction.')
 
     @dumpsql
+    @check_connection
     @placeholder
     def execute(self, sql, *args, returnid=None):
         self.cursor.execute(sql, args)

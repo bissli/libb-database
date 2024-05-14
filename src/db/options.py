@@ -22,6 +22,7 @@ class DatabaseOptions(ConfigOptions):
     timeout: int = 0
     appname: str = None
     cleanup: bool = True
+    check_connection: bool = True
     pandas_backend: str = 'numpy'
 
     def __post_init__(self):
