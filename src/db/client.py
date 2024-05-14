@@ -107,19 +107,14 @@ for k in tuple(postgres_types):
 
 # == defined errors
 
-
-PgIntegrityError = psycopg.IntegrityError
-PgUniqueViolation = psycopg.errors.UniqueViolation
-PgProgrammingError = psycopg.ProgrammingError
-PgOperationalError = psycopg.OperationalError
-
-ProgrammingError = pymssql.DatabaseError
-IntegrityError = pymssql.IntegrityError
-GeneralError = pymssql.Error
-OperationalError = pymssql.OperationalError
-
-# generally raised when connection is closed
-OperationalError = (PgOperationalError, OperationalError)
+DbConnectionError = (psycopg.OperationalError, psycopg.InterfaceError,
+                     pymssql.OperationalError, sqlite3.InterfaceError)
+DbIntegrityError = (psycopg.IntegrityError, pymssql.IntegrityError,
+                    sqlite3.IntegrityError)
+DbProgrammingError = (psycopg.ProgrammingError, pymssql.DatabaseError,
+                      sqlite3.DatabaseError)
+DbOperationalError = (psycopg.OperationalError, pymssql.OperationalError,
+                      sqlite3.OperationalError)
 
 
 def check_connection(func, x_times=1):
@@ -131,7 +126,7 @@ def check_connection(func, x_times=1):
         while tries <= x_times:
             try:
                 return func(*args, **kwargs)
-            except OperationalError as err:
+            except DbConnectionError as err:
                 if tries > x_times:
                     raise err
                 tries += 1
