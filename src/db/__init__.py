@@ -1,8 +1,8 @@
-from db.db import *
+from db.client import *
 from db.options import DatabaseOptions
 
 __all__ = [
-    # db
+    # client
     'transaction',
     'callproc',
     'connect',
