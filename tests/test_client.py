@@ -1,4 +1,4 @@
-import db
+import database as db
 
 
 def test_select(psql_docker, conn):

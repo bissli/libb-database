@@ -1,10 +1,10 @@
 [tool.poetry]
-name = "libb-db"
+name = "database"
 version = "0.1.0"
 description = ""
 authors = ["bissli <bissli@xyz.com>"]
 readme = "README.md"
-packages = [{ include = "db", from = "src" }]
+packages = [{ include = "database", from = "src" }]
 
 [tool.poetry.dependencies]
 python = "~3.11"

@@ -1,5 +1,5 @@
-from db.client import *
-from db.options import DatabaseOptions
+from database.client import *
+from database.options import DatabaseOptions
 
 __all__ = [
     # client
