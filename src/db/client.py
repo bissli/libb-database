@@ -11,7 +11,6 @@ from typing import Any
 
 import pandas as pd
 import psycopg
-import pyarrow as pa
 import pymssql
 from more_itertools import flatten
 from psycopg import ClientCursor
@@ -44,7 +43,6 @@ __all__ = [
     'select_scalar_or_none',
     'update_or_insert',
     'update_row',
-    'create_dataframe'
     ]
 
 register_adapters()
@@ -355,7 +353,7 @@ def IterChunk(cursor, size=5000):
 def select(cn, sql, *args, **kwargs) -> pd.DataFrame:
     cursor = _dict_cur(cn)
     cursor.execute(sql, args)
-    return create_dataframe(cursor, **kwargs)
+    return load_data(cursor, **kwargs)
 
 
 @dumpsql
@@ -369,7 +367,7 @@ def callproc(cn, sql, *args, **kwargs) -> pd.DataFrame:
     """
     cursor=_dict_cur(cn)
     cursor.execute(sql, args)
-    return create_dataframe(cursor, **kwargs)
+    return load_data(cursor, **kwargs)
 
 
 class DictRowFactory:
@@ -396,20 +394,16 @@ def _dict_cur(cn):
     raise ValueError('Unknown connection type')
 
 
-def create_dataframe(cursor) -> pd.DataFrame:
-    """Patchable function (see `__init__.py`) that wraps raw
-    cursor with object
+def load_data(cursor) -> pd.DataFrame:
+    """Data loader callable (IE into DataFrame)
     """
     if isinstance(cursor.connwrapper.connection, psycopg.Connection):
         cols = [c.name for c in (cursor.description or [])]
     if isinstance(cursor.connwrapper.connection, pymssql.Connection | sqlite3.Connection):
         cols = [c[0] for c in (cursor.description or [])]
     data = cursor.fetchall()  # iterdict (dictcursor)
-    if cursor.connwrapper.options.pandas_backend == 'numpy':
-        return pd.DataFrame.from_records(list(data), columns=cols)
-    if cursor.connwrapper.options.pandas_backend == 'pyarrow':
-        dataT = [[row[col] for row in data] for col in cols]  # list of cols
-        return pa.table(dataT, names=cols).to_pandas(types_mapper=pd.ArrowDtype)
+    data_loader = cursor.connwrapper.options.data_loader
+    return data_loader(data, cols)
 
 
 def select_column(cn, sql, *args):
@@ -518,7 +512,7 @@ class transaction:
     def select(self, sql, *args, **kwargs) -> pd.DataFrame:
         cursor = self.cursor
         cursor.execute(sql, args)
-        return create_dataframe(cursor, **kwargs)
+        return load_data(cursor, **kwargs)
 
 
 @dumpsql

@@ -22,7 +22,6 @@ __all__ = [
     'select_scalar_or_none',
     'update_or_insert',
     'update_row',
-    'create_record',
     # options
     'DatabaseOptions',
     ]
