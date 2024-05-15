@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 
 import pandas as pd
 import pyarrow as pa
@@ -49,7 +49,8 @@ class DatabaseOptions(ConfigOptions):
             'drivername must be `postgres`, `sqlserver`, or `sqlite`'
         self.appname = self.appname or scriptname() or 'python_console'
         if self.drivername in {'postgres', 'sqlserver'}:
-            for field in fields(self):
-                assert getattr(self, field.name), f'field {field.name} cannot be None or 0'
+            for field in ('hostname', 'username', 'password', 'database',
+                          'port', 'timeout'):
+                assert getattr(self, field), f'field {field} cannot be None or 0'
         if self.drivername == 'sqlite':
             assert self.database, 'field database cannot be None'
