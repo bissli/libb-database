@@ -492,7 +492,7 @@ class transaction:
     def execute(self, sql, *args, returnid=None):
         self.cursor.execute(sql, args)
         if not returnid:
-            return self.cursor.rowcount
+            return max(0, self.cursor.rowcount)
         else:
             result = None
             try:
