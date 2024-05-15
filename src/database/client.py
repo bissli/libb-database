@@ -629,7 +629,7 @@ values
 
     logger.info(f'Inserted {rc} rows into {table}')
     if rc != len(rows):
-        logger.warning(f'{len(rows) - rc} rows were skipped due to existing contraints')
+        logger.debug(f'{len(rows) - rc} rows were skipped due to existing contraints')
     return rc
 
 
