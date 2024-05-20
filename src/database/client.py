@@ -214,7 +214,7 @@ class CursorWrapper:
         if isinstance(self.connwrapper.connection, pymssql.Connection | sqlite3.Connection):
             logger.debug(f'SQL:\n{sql}\nargs: {str(args)}\nkwargs: {str(kwargs)}')
         self.cursor.execute(sql, *args, **kwargs)
-        logger.debug(f'Status message: {self.cursor.statusmessage}')
+        logger.debug(f'Query result: {self.cursor.statusmessage}')
         end = time.time()
         self.connwrapper.addcall(end - start)
         logger.debug('Query time: %f' % (end - start))
@@ -537,11 +537,9 @@ def update_or_insert(cn, update_sql, insert_sql, *args):
     """TODO: better way to do this query is with postgres on conflict do ..."""
     with transaction(cn) as tx:
         rc = tx.execute(update_sql, args)
-        logger.info(f'Updated {rc} rows')
         if rc:
             return rc
         rc = tx.execute(insert_sql, args)
-        logger.info(f'Inserted {rc} rows')
         return rc
 
 
@@ -640,7 +638,6 @@ values
             id_name = kw.pop('id_name', 'id')
             reset_sequence(cn, table, id_name)
 
-    logger.info(f'Inserted {rc} rows into {table}')
     if rc != len(rows):
         logger.debug(f'{len(rows) - rc} rows were skipped due to existing contraints')
     return rc
