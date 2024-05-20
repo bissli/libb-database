@@ -19,7 +19,7 @@ from psycopg import ClientCursor
 from psycopg.postgres import types
 
 from date import Date, DateTime
-from libb import load_options
+from libb import isiterable, load_options
 
 logger = logging.getLogger(__name__)
 
@@ -214,9 +214,11 @@ class CursorWrapper:
         if isinstance(self.connwrapper.connection, pymssql.Connection | sqlite3.Connection):
             logger.debug(f'SQL:\n{sql}\nargs: {str(args)}\nkwargs: {str(kwargs)}')
         self.cursor.execute(sql, *args, **kwargs)
+        logger.debug(f'Status message: {self.cursor.statusmessage}')
         end = time.time()
         self.connwrapper.addcall(end - start)
-        logger.debug('Query time=%f' % (end - start))
+        logger.debug('Query time: %f' % (end - start))
+        return self.cursor.rowcount
 
 
 def dumpsql(func):
@@ -248,7 +250,7 @@ def placeholder(func):
 
 def _page_mssql(sql, order_by, offset, limit):
     """Wrap a MSSQL stmt in sql server windowing notation, strip existing order by"""
-    if isinstance(order_by, tuple | tuple):
+    if isiterable(order_by):
         order_by = ','.join(order_by)
     match = re.search('order by', sql, re.IGNORECASE)
     if match:
@@ -263,7 +265,7 @@ FETCH NEXT {limit} ROWS ONLY"""
 
 def _page_pgsql(sql, order_by, offset, limit):
     """Wrap a Postgres SQL stmt in sql server windowing notation, strip existing order by"""
-    if isinstance(order_by, tuple | tuple):
+    if isiterable(order_by):
         order_by = ','.join(order_by)
     match = re.search('order by', sql, re.IGNORECASE)
     if match:
@@ -490,19 +492,21 @@ class transaction:
     @check_connection
     @placeholder
     def execute(self, sql, *args, returnid=None):
-        self.cursor.execute(sql, args)
+        rc = self.cursor.execute(sql, args)
         if not returnid:
-            return max(0, self.cursor.rowcount)
+            return rc
         else:
+            # may not work as cursor object may no longer exist
+            # getting recreated on each call
             result = None
             try:
                 result = self.cursor.fetchone()
             except:
-                logger.warning('No results to return')
+                logger.debug('No results to return')
             finally:
                 if not result:
                     return
-            if isinstance(returnid, tuple | tuple):
+            if isiterable(returnid):
                 return [result[r] for r in returnid]
             else:
                 return result[returnid]
@@ -550,17 +554,22 @@ select skeys(hstore(null::{table})) as column
 
 
 def get_table_primary_keys(cn, table):
-    sql = """
-select
-    a.attname as column,
-    format_type(a.atttypid, a.atttypmod) as type
-from
-    pg_index i
-join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
-where
-    i.indrelid = %s::regclass
-    and i.indisprimary
-    """
+    if cn.options.drivername == 'postgres':
+        sql = """
+    select
+        a.attname as column,
+        format_type(a.atttypid, a.atttypmod) as type
+    from
+        pg_index i
+    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
+    where
+        i.indrelid = %s::regclass
+        and i.indisprimary
+        """
+    if cn.options.drivername == 'sqlite':
+        sql = """
+    select l.name as column from pragma_table_info("%s") as l where l.pk <> 0
+        """
     cols = [row['column'] for row in select(cn, sql, table).to_dict('records')]
     return cols
 
