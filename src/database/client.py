@@ -577,6 +577,10 @@ def upsert_rows(
 ):
     """One step database insert of iterdict
     """
+    if not rows:
+        logger.debug('Skipping upsert of empty rows')
+        return
+
     assert isinstance(cn.connection, psycopg.Connection), '`upsert_rows` only supports postgres'
     reset=kw.pop('reset_sequence', False)
 
