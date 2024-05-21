@@ -45,9 +45,10 @@ DROP TABLE IF EXISTS test_table;
 
     create_and_insert_data = """
 CREATE TABLE test_table (
-    id SERIAL PRIMARY KEY,
+    id SERIAL NOT NULL,
     name VARCHAR(255) NOT NULL,
-    value INTEGER NOT NULL
+    value INTEGER NOT NULL,
+    primary key (name)
 );
 
 INSERT INTO test_table (name, value) VALUES

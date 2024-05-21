@@ -70,5 +70,14 @@ def test_connect_respawn(psql_docker, conn):
     assert result == expected_data
 
 
+def test_upsert(psql_docker, conn):
+    """Assert row count is accurate"""
+    rows = [{'name': 'Barry', 'value': 50}, {'name': 'Wallace', 'value': 92}]
+    assert 2 == db.upsert_rows(conn, 'test_table', rows)
+    rows = [{'name': 'Barry', 'value': 50}]
+    assert 0 == db.upsert_rows(conn, 'test_table', rows)
+    assert 1 == db.upsert_rows(conn, 'test_table', rows, conflict_key_cols=['name'])
+
+
 if __name__ == '__main__':
     __import__('pytest').main([__file__])
