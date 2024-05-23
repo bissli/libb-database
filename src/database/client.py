@@ -2,6 +2,7 @@ import atexit
 import logging
 import re
 import sqlite3
+import sys
 import time
 from collections.abc import Sequence
 from dataclasses import fields
@@ -150,6 +151,19 @@ def isconnection(cn):
         return False
 
 
+def psycopg_error_message(err):
+    err_type, err_obj, traceback = sys.exc_info()
+    line_num = traceback.tb_lineno
+    message = f"""
+psycopg error: {err}, on line number: {line_num}
+psycopg traceback: {traceback} -- type: {err_type}
+extensions.Diagnostics: {err.diag}
+pgerror: {err.pgerror}
+pgcode: {err.pgcode}
+    """
+    logger.exception(message)
+
+
 class ConnectionWrapper:
     """Wraps a connection object so we can keep track of the
     calls and execution time of any cursors used by this connection.
@@ -229,7 +243,7 @@ def dumpsql(func):
             return func(cn, sql, *args, **kwargs)
         except Exception as exc:
             logger.error(f'Error with query:\nSQL: {sql}\nARGS: {args}\nKWARGS:{kwargs}')
-            logger.exception(exc)
+            psycopg_error_message(exc)
             raise exc
     return wrapper
 
@@ -281,10 +295,10 @@ class LoggingCursor(ClientCursor):
     """See https://github.com/psycopg/psycopg/discussions/153 if
     considering replacing raw connections with SQLAlchemy
     """
-    def execute(self, query, params=None):
+    def execute(self, query, params=None, *args, **kwargs):
         formatted = self.mogrify(query, params)
         logger.debug('SQL:\n' + formatted)
-        result = super().execute(query, params)
+        result = super().execute(query, params, *args, **kwargs)
         return result
 
 
