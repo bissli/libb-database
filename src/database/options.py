@@ -5,10 +5,10 @@ import pyarrow as pa
 
 from libb import ConfigOptions, scriptname
 
-__all__ = ['DatabaseOptions', 'data_loader']
+__all__ = ['DatabaseOptions', 'pandas_data_loader']
 
 
-def data_loader(backend='numpy'):
+def pandas_data_loader(backend='numpy'):
     """Custom data loader. Takes list of dictionaries as data input. User
     can overwrite data loader by passing in any similar function.
     """
@@ -42,7 +42,7 @@ class DatabaseOptions(ConfigOptions):
     appname: str = None
     cleanup: bool = True
     check_connection: bool = True
-    data_loader: callable = field(default_factory=data_loader)
+    data_loader: callable = field(default_factory=pandas_data_loader)
 
     def __post_init__(self):
         assert self.drivername in {'postgres', 'sqlserver', 'sqlite'}, \
