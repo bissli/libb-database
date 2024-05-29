@@ -10,6 +10,7 @@ from functools import wraps
 from numbers import Number
 from typing import Any
 
+import cachetools
 import pandas as pd
 import psycopg
 import pymssql
@@ -565,7 +566,14 @@ select skeys(hstore(null::{table})) as column
     return cols
 
 
-def get_table_primary_keys(cn, table):
+def ignore_first_argument_cache_key(cls, *args, **kwargs):
+    return cachetools.keys.hashkey(*args, **kwargs)
+
+
+@cachetools.cached(cache=cachetools.TTLCache(maxsize=10, ttl=60), key=ignore_first_argument_cache_key)
+def get_table_primary_keys(cn, table, _=None):
+    """Extra parameter for database switching. Pass in flag to bypass cache.
+    """
     if cn.options.drivername == 'postgres':
         sql = """
     select
@@ -590,10 +598,10 @@ def upsert_rows(
     cn,
     table: str,
     rows: tuple[dict],
-    lookup_primary_keys: bool = False,
-    lookup_table_cols: bool = False,
-    conflict_key_cols: tuple = (),
-    conflict_update_coalesce_cols: tuple = (),
+    update_cols_key: list = None,
+    update_cols_always: list = None,
+    update_cols_ifnull: list = None,
+    reset_sequence: bool = False,
     **kw
 ):
     """One step database insert of iterdict
@@ -602,35 +610,32 @@ def upsert_rows(
         logger.debug('Skipping upsert of empty rows')
         return
 
-    assert isinstance(cn.connection, psycopg.Connection), '`upsert_rows` only supports postgres'
-    reset=kw.pop('reset_sequence', False)
-
     cols = tuple(rows[0])  # assume consistency
 
-    if lookup_table_cols:
-        table_cols = get_table_columns(cn, table)
-        for col in cols.copy():
-            if col.lower() not in table_cols:
-                cols.remove(col)
-                for row in rows:
-                    row.pop(col, None)
-                logger.debug(f'Removed {col}, not a column of {table}')
+    assert isinstance(cn.connection, psycopg.Connection), '`upsert_rows` only supports postgres'
 
-    if lookup_primary_keys and not conflict_key_cols:
-        conflict_key_cols = get_table_primary_keys(cn, table)
-    if conflict_key_cols:
-        upd_cols=conflict_key_cols and [c for c in cols if c not in conflict_key_cols]
+    if not update_cols_key:
+        update_cols_key = get_table_primary_keys(cn, table, cn.options.drivername)
 
-    upd_cols=conflict_key_cols and [c for c in cols if c not in conflict_key_cols]
-    if upd_cols:
-        coalesce= lambda t, c: f'{c}=coalesce({t}.{c}, excluded.{c})' \
-            if c in conflict_update_coalesce_cols \
+    if not update_cols_key:
+        update_cols_always = update_cols_ifnull = update_cols = []
+    else:
+        update_cols_always = [c for c in (update_cols_always or []) if c in cols]
+        update_cols_ifnull = [c for c in (update_cols_ifnull or []) if c in cols]
+        update_cols_always = [c for c in update_cols_always if c not in update_cols_ifnull+update_cols_key]
+        update_cols_ifnull = [c for c in update_cols_ifnull if c not in update_cols_always+update_cols_key]
+        update_cols = update_cols_always+update_cols_ifnull
+
+    if update_cols:
+        coalesce=lambda t, c: \
+            f'{c}=coalesce({t}.{c}, excluded.{c})' \
+            if c in update_cols_ifnull \
             else f'{c}=excluded.{c}'
         conflict = f"""
 on conflict (
-    {','.join(conflict_key_cols)}
+    {','.join(update_cols_key)}
 ) do update set
-    {', '.join([coalesce(table, c) for c in upd_cols])}
+    {', '.join([coalesce(table, c) for c in update_cols])}
 """.strip()
     else:
         conflict = 'on conflict do nothing'
@@ -648,9 +653,9 @@ values
         with transaction(cn) as tx:
             rc = tx.execute(table_cols_sql, *vals)
     finally:
-        if reset:
+        if reset_sequence:
             id_name = kw.pop('id_name', 'id')
-            reset_sequence(cn, table, id_name)
+            reset_table_sequence(cn, table, id_name)
 
     if rc != len(rows):
         logger.debug(f'{len(rows) - rc} rows were skipped due to existing contraints')
@@ -709,7 +714,7 @@ def update_row_sql(table, keyfields, datafields):
     return f'update {table} set {datacols} where {keycols}'
 
 
-def reset_sequence(cn, table, identity='id'):
+def reset_table_sequence(cn, table, identity='id'):
     sql = f"""
 select
     setval(pg_get_serial_sequence('{table}', '{identity}'), coalesce(max({identity}),0)+1, false)

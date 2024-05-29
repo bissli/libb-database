@@ -73,10 +73,33 @@ def test_connect_respawn(psql_docker, conn):
 def test_upsert(psql_docker, conn):
     """Assert row count is accurate"""
     rows = [{'name': 'Barry', 'value': 50}, {'name': 'Wallace', 'value': 92}]
-    assert 2 == db.upsert_rows(conn, 'test_table', rows)
-    rows = [{'name': 'Barry', 'value': 50}]
-    assert 0 == db.upsert_rows(conn, 'test_table', rows)
-    assert 1 == db.upsert_rows(conn, 'test_table', rows, conflict_key_cols=['name'])
+    assert 2 == db.upsert_rows(conn, 'test_table', rows, update_cols_always=['value'])
+
+    # same value, no update
+    rows = [{'name': 'Barry', 'value': 53}]
+    assert 1 == db.upsert_rows(conn, 'test_table', rows, update_cols_ifnull=['value'])
+    res = db.select_scalar(conn, 'select value from test_table where name = %s', 'Barry')
+    assert int(res) == 50
+
+    # auto lookup primary key
+    rows = [{'name': 'Barry', 'value': 52}]
+    assert 1 == db.upsert_rows(conn, 'test_table', rows, update_cols_always=['value'])
+    res = db.select_scalar(conn, 'select value from test_table where name = %s', 'Barry')
+    assert int(res) == 52
+
+    # pass in primary key
+    rows = [{'name': 'Barry', 'value': 51}, {'name': 'Wallace', 'value': 90}]
+    assert 2 == db.upsert_rows(conn, 'test_table', rows, update_cols_key=['name'], update_cols_always=['value'])
+    res = db.select_scalar(conn, 'select value from test_table where name = %s', 'Wallace')
+    assert int(res) == 90
+    res = db.select_scalar(conn, 'select value from test_table where name = %s', 'Barry')
+    assert int(res) == 51
+
+    # pass in non-existent column
+    rows = [{'name': 'Barry', 'value': 0}]
+    db.upsert_rows(conn, 'test_table', rows, update_cols_key=['name'], update_cols_always=['not-value'])
+    res = db.select_scalar(conn, 'select value from test_table where name = %s', 'Barry')
+    assert int(res) == 51
 
 
 if __name__ == '__main__':
