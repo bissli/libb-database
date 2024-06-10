@@ -79,6 +79,7 @@ where
 @pytest.fixture(scope='session')
 def conn():
     cn = db.connect('postgres', config)
+    assert db.isconnection(cn)
     terminate_postgres_connections(cn)
     stage_test_data(cn)
     try:

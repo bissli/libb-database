@@ -45,6 +45,7 @@ __all__ = [
     'select_scalar_or_none',
     'update_or_insert',
     'update_row',
+    'isconnection',
     ]
 
 register_adapters()
@@ -140,16 +141,22 @@ def check_connection(func, x_times=1):
 # == main
 
 
-CONNECTIONOBJ = (psycopg.Connection, pymssql.Connection)
+CONNECTIONOBJ = psycopg.Connection | pymssql.Connection | sqlite3.Connection
+
+try:
+    import psycopg2
+    CONNECTIONOBJ |=  psycopg2.extensions.connection
+except ModuleNotFoundError:
+    pass
 
 
-def isconnection(cn):
-    """Utility to test for the presence of a mock connection
-    """
-    try:
-        return isinstance(cn.connection, CONNECTIONOBJ)
-    except:
-        return False
+def isconnection(obj):
+    """Connection type check."""
+    if isinstance(obj, CONNECTIONOBJ):
+        return True
+    if hasattr(obj, 'connection'):
+        return isinstance(obj.connection, CONNECTIONOBJ)
+    return False
 
 
 def psycopg_error_message(err):
