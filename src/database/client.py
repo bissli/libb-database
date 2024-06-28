@@ -2,7 +2,6 @@ import atexit
 import logging
 import re
 import sqlite3
-import sys
 import time
 from collections.abc import Sequence
 from dataclasses import fields
@@ -159,19 +158,6 @@ def isconnection(obj):
     return False
 
 
-def psycopg_error_message(err):
-    err_type, err_obj, traceback = sys.exc_info()
-    line_num = traceback.tb_lineno
-    message = f"""
-psycopg error: {err}, on line number: {line_num}
-psycopg traceback: {traceback} -- type: {err_type}
-extensions.Diagnostics: {err.diag}
-pgerror: {err.pgerror}
-pgcode: {err.pgcode}
-    """
-    logger.exception(message)
-
-
 class ConnectionWrapper:
     """Wraps a connection object so we can keep track of the
     calls and execution time of any cursors used by this connection.
@@ -233,8 +219,6 @@ class CursorWrapper:
         created this connection.
         """
         start = time.time()
-        if isinstance(self.connwrapper.connection, pymssql.Connection | sqlite3.Connection):
-            logger.debug(f'SQL:\n{sql}\nargs: {str(args)}\nkwargs: {str(kwargs)}')
         self.cursor.execute(sql, *args, **kwargs)
         logger.debug(f'Query result: {self.cursor.statusmessage}')
         end = time.time()
@@ -248,11 +232,12 @@ def dumpsql(func):
     @wraps(func)
     def wrapper(cn, sql, *args, **kwargs):
         try:
+            if isinstance(cn.connection, pymssql.Connection | sqlite3.Connection):
+                logger.debug(f'SQL:\n{sql}\nargs: {args}\nkwargs: {kwargs}')
             return func(cn, sql, *args, **kwargs)
-        except Exception as exc:
-            logger.error(f'Error with query:\nSQL: {sql}\nARGS: {args}\nKWARGS:{kwargs}')
-            psycopg_error_message(exc)
-            raise exc
+        except:
+            logger.error(f'Error with query:\nSQL:\n{sql}\nargs: {args}\nkwargs: {kwargs}')
+            raise
     return wrapper
 
 
